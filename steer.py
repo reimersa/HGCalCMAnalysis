@@ -108,12 +108,9 @@ def main():
         # compute_covariances_and_eigen.compute_covariances_and_eigen(cfg=cfg, inferencer=inferencer, column_tag="_resid_dnn")
         # add_projections_onto_noisemode.add_projections_onto_noisemode(cfg=cfg, inferencer=inferencer, column_tag="_pred_dnn", k=0)
         # add_projections_onto_noisemode.add_projections_onto_noisemode(cfg=cfg, inferencer=inferencer, column_tag="_resid_dnn", k=0)
-
-
-
-
-        functions_plot.plot_coh_inc(value_iterator=inferencer_sel.full_df_iter, adc_colname_template_true=f"adc_ch*_pedsub", adc_colname_template_corr=f"adc_ch*_pedsub_resid_analytic_k0", nch_per_erx=cfg.nch_per_erx, nerx=cfg.nerx, out_root=os.path.join(cfg.plotfolder_base, selection, "coherent_noise", "resid_analytic_k0"), trunc_fracs = (1.0,))
-        functions_plot.plot_coh_inc(value_iterator=inferencer_sel.full_df_iter, adc_colname_template_true=f"adc_ch*_pedsub", adc_colname_template_corr=f"adc_ch*_pedsub_resid_dnn", nch_per_erx=cfg.nch_per_erx, nerx=cfg.nerx, out_root=os.path.join(cfg.plotfolder_base, selection, "coherent_noise", "resid_dnn"), trunc_fracs = (1.0,))
+        
+        plot.plot_coherent_noise(cfg=cfg, inferencer=inferencer_sel, column_tag="_resid_analytic_k0", selection=selection, trunc_fracs=(1.0,))
+        plot.plot_coherent_noise(cfg=cfg, inferencer=inferencer_sel, column_tag="_resid_dnn", selection=selection, trunc_fracs=(1.0,))
 
 
         plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="", selection=selection)

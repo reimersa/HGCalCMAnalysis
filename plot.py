@@ -168,6 +168,23 @@ def plot(cfg, inferencer, column_tag, selection) -> None:
     print(f"Successfully finished plotting everything!")
 
 
+def plot_coherent_noise(cfg, inferencer, column_tag, selection, trunc_fracs=(1.0,)) -> None:
+    plot_dir = os.path.join(cfg.plotfolder_base, selection)
+    method_subfolder = column_tag.strip("_")
+    if method_subfolder == "":
+        method_subfolder = "true"
+
+    functions_plot.plot_coh_inc(
+        value_iterator=inferencer.full_df_iter,
+        adc_colname_template_true="adc_ch*_pedsub",
+        adc_colname_template_corr=f"adc_ch*_pedsub{column_tag}",
+        nch_per_erx=cfg.nch_per_erx,
+        nerx=cfg.nerx,
+        out_root=os.path.join(plot_dir, "coherent_noise", method_subfolder),
+        trunc_fracs=trunc_fracs,
+    )
+
+
 
 
 
