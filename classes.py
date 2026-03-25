@@ -110,12 +110,7 @@ class AnalysisConfig:
         self.histofiller_folder              = self.get_histofiller_folder()
         self.analysis_inputs_folder          = os.path.join(self.datafolder_base, f"Run{self.run}/analysis_inputs{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}/corrections_from_Run{self.run_for_correction}")
         self.pedestal_mean_std_folder        = os.path.join(self.datafolder_base, f"Run{self.run_for_pedestal}/means_stds{self.inputfoldertag}/{self.modulename}")
-        # self.pedestal_covs_folder            = os.path.join(self.datafolder_base, f"Run{self.run_for_pedestal}/covs{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}/corrections_from_Run{self.run_for_correction}")
         self.own_covs_folder                 = os.path.join(self.datafolder_base, f"Run{self.run}/covs{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}/corrections_from_Run{self.run_for_correction}")
-        # self.analytic_predictor_folder       = os.path.join(self.datafolder_base, f"Run{self.run_for_pedestal}/predictors{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}") # always derived from pedestal runs only
-        # self.dnn_inputs_folder               = os.path.join(self.datafolder_base, f"Run{self.run}/dnn_inputs{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}")
-        # self.dnn_models_folder               = os.path.join(self.datafolder_base, f"Run{self.run}/dnn_models{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}") # in case we ever want to train on beam data
-        # self.dnn_models_from_pedestal_folder = os.path.join(self.datafolder_base, f"Run{self.run_for_pedestal}/dnn_models{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}") # where we will usually take the DNN from
 
         self.corrections_base_folder   = os.path.join(self.datafolder_base, f"corrections{self.inputfoldertag}", self.modulename, f"pedestals_from_Run{self.run_for_pedestal}", f"corrections_from_Run{self.run_for_correction}")
         self.analytic_predictor_folder = os.path.join(self.corrections_base_folder, "predictors")
@@ -177,9 +172,6 @@ class AnalysisConfig:
     def load_from_cov_folder(self, filename):
         return pd.read_parquet(os.path.join(self.own_covs_folder, filename))
 
-    # def load_from_pedestal_cov_folder(self, filename):
-    #     return pd.read_parquet(os.path.join(self.pedestal_covs_folder, filename))
-
     def load_from_corrections_cov_folder(self, filename):
         return pd.read_parquet(os.path.join(self.corrections_covs_folder, filename))
 
@@ -215,7 +207,6 @@ class CovAccumulator:
         self.n_j = len(self.cols_j)
         self.S = np.zeros((self.n_i, self.n_j), dtype=float)
         self.N = np.zeros((self.n_i, self.n_j), dtype=float)
-        # self.n_rows = 0 # global den
 
     def update(self, df_i: pd.DataFrame, df_j: pd.DataFrame) -> None:
         # sanity
@@ -233,27 +224,20 @@ class CovAccumulator:
         # accumulate
         self.S += X_i.T @ X_j
         self.N += M_i.T @ M_j
-        # self.n_rows += X_i.shape[0]
 
     def finalize(self) -> pd.DataFrame:
-        # print("in CovAccumulator: finalizing!")
         with np.errstate(invalid="ignore", divide="ignore"):
             C = self.S / self.N
         C = np.nan_to_num(C, nan=0.0, posinf=0.0, neginf=0.0)
-        # if self.n_rows == 0:
-        #     raise RuntimeError("CovAccumulator.finalize: no rows accumulated.")
-        # C = self.S / float(self.n_rows)
         return pd.DataFrame(C, index=self.cols_i, columns=self.cols_j)
 
 
 
 class DNNBatch:
-    # def __init__(self, cfg, df_inputs: pd.DataFrame, df_targets: pd.DataFrame, df_shuffle: pd.DataFrame):
     def __init__(self, cfg, df_inputs: pd.DataFrame, df_targets: pd.DataFrame):
         self.cfg = cfg
         self.df_inputs = df_inputs
         self.df_targets = df_targets
-        # self.df_shuffle = df_shuffle
 
     @property
     def full_inputs_df(self) -> pd.DataFrame:
@@ -263,10 +247,6 @@ class DNNBatch:
     def full_targets_df(self) -> pd.DataFrame:
         return self.df_targets
 
-    # @property
-    # def full_shuffle_df(self) -> pd.DataFrame:
-    #     return self.df_shuffle
-
 class DNNBatchIter:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -274,25 +254,15 @@ class DNNBatchIter:
 
         self.inputfiles   = sorted(glob(os.path.join(base, "inputs_chunk*.parquet")))
         self.targetfiles  = sorted(glob(os.path.join(base, "targets_chunk*.parquet")))
-        # self.shufflefiles = sorted(glob(os.path.join(base, "shuffle_chunk*.parquet")))
 
         if not self.inputfiles:
             raise RuntimeError(f"No DNN input chunks found in {base} (inputs_chunk*.parquet)")
-        # if not (len(self.inputfiles) == len(self.targetfiles) == len(self.shufflefiles)):
-        #     raise RuntimeError(f"Mismatch chunk counts in {base}: inputs={len(self.inputfiles)} targets={len(self.targetfiles)} shuffle={len(self.shufflefiles)}")
         if not (len(self.inputfiles) == len(self.targetfiles)):
             raise RuntimeError(f"Mismatch chunk counts in {base}: inputs={len(self.inputfiles)} targets={len(self.targetfiles)}")
 
-        # self.splitfile = os.path.join(base, "event_split_train_test.parquet")
-        # if not os.path.exists(self.splitfile):
-        #     raise RuntimeError(f"Missing split file: {self.splitfile}")
-
     def __iter__(self):
-        # for fin, ftg, fsh in zip(self.inputfiles, self.targetfiles, self.shufflefiles):
         for fin, ftg in zip(self.inputfiles, self.targetfiles):
             df_inputs  = pd.read_parquet(fin)
             df_targets = pd.read_parquet(ftg)
-            # df_shuffle = pd.read_parquet(fsh)
 
-            # yield DNNBatch(cfg=self.cfg, df_inputs=df_inputs, df_targets=df_targets, df_shuffle=df_shuffle) 
             yield DNNBatch(cfg=self.cfg, df_inputs=df_inputs, df_targets=df_targets) 

@@ -76,7 +76,6 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
     train_inferencer = inferencers.AnalysisDNNInferencer(cfg=cfg, split="train", per_channel_cols=per_channel_cols)
     test_inferencer  = inferencers.AnalysisDNNInferencer(cfg=cfg, split="test", per_channel_cols=per_channel_cols)
 
-    ### HACK: this is for the per-channel DNN
     # --- infer input_dim from first yielded batch ---
     probe_x = None
     for x, y in train_inferencer.sample_iter(batch_samples=batch_samples, include_targets=True):
@@ -101,26 +100,6 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
     model = dnn_models.PerChannelDNN(input_dim=input_dim, nodes_per_layer=nodes, dropout_rate=dropout, tag=tag).to(device)
     # criterion = MSEPlusOffDiagFracLossFlatOrdered(eps=1e-12, lam=10.0)
     # criterion = GlobalCoherentNoiseLossFlatOrdered()
-    ### END HACK for per-channel DNN
-
-    ### HACK: this is for the all-channels (flattened) DNN
-    # # --- infer (C, F) from first yielded batch ---
-    # probe = None
-    # for x_cf, y in train_inferencer.sample_iter_allchannels(batch_samples=batch_samples, include_targets=True):
-    #     probe = x_cf
-    #     break
-    # if probe is None:
-    #     raise RuntimeError("Could not probe AllChannelsDNN dims: no batches yielded from train split.")
-    # # probe: [B, C, F]
-    # C = int(probe.shape[1])
-    # F = int(probe.shape[2])
-    # print(f"Detected C = {C}, per_channel_dim F = {F}")
-
-    # # --- model ---
-    # model = dnn_models.AllChannelsDNN(num_channels=C, per_channel_dim=F, nodes_per_layer=nodes, dropout_rate=dropout, tag=tag).to(device)
-    # # criterion = MSEPlusOffDiagFracLossFlatOrdered(eps=1e-12, lam=10.0)
-    # # criterion = GlobalCoherentNoiseLossFlatOrdered()
-    ### END HACK for all-channels DNN
 
     if override_name:
         model.override_model_string(new_name)
@@ -164,7 +143,6 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
 
         train_epoch = 0
 
-        ### HACK: this is for the per-channel DNN
         for x_np, y_np in train_inferencer.sample_iter(batch_samples=batch_samples, include_targets=True, epoch_seed=epoch):
             x = torch.from_numpy(x_np).to(device=device, dtype=torch.float32)
             y = torch.from_numpy(y_np).to(device=device, dtype=torch.float32)
@@ -209,38 +187,6 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
                 pbar.update(int(x.shape[0]))
         
             train_epoch += 1
-        ### END HACK for per-channel DNN
-
-        ### HACK: this is for the all-channels (flattened) DNN
-        # for x_cf_np, y_np in train_inferencer.sample_iter_allchannels(batch_samples=batch_samples, include_targets=True, epoch_seed=epoch):
-        #     x_cf = torch.from_numpy(x_cf_np).to(device=device, dtype=torch.float32)  # [B,C,F]
-        #     y    = torch.from_numpy(y_np).to(device=device, dtype=torch.float32)     # [B,C]
-
-        #     optimizer.zero_grad(set_to_none=True)
-        #     pred = model(x_cf)  # [B,C]
-
-        #     loss = masked_mse_bc(pred, y)
-
-        #     # if this batch is fully invalid, skip
-        #     if loss.item() == 0.0 and not torch.any(torch.isfinite(pred) & torch.isfinite(y)):
-        #         if show_progbar:
-        #             pbar.update(int(x_cf.shape[0] * cfg.nch))
-        #         continue
-
-        #     loss.backward()
-        #     optimizer.step()
-
-        #     sum_loss += float(loss.item())
-        #     sum_count += 1
-
-        #     if show_progbar:
-        #         pbar.set_postfix({"batch_mse": f"{loss.item():.4f}", "steps": sum_count})
-        #         pbar.update(int(x_cf.shape[0] * cfg.nch))
-
-        #     train_epoch += 1
-        ### END HACK for all-channels DNN
-
-
 
 
 
@@ -261,7 +207,6 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
             pbar = tqdm(total=n_test, desc="Validation", unit="samples", leave=False, dynamic_ncols=True)
 
         with torch.no_grad():
-            ### HACK: this is for the per-channel DNN
             for x_np, y_np in test_inferencer.sample_iter(batch_samples=batch_samples, include_targets=True):
                 x = torch.from_numpy(x_np).to(device=device, dtype=torch.float32)
                 y = torch.from_numpy(y_np).to(device=device, dtype=torch.float32)
@@ -280,31 +225,6 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
                 if show_progbar:
                     pbar.set_postfix({"batch_mse": f"{loss.item():.4f}", "steps": sum_vcount})
                     pbar.update(int(x.shape[0]))
-            ### END HACK for per-channel DNN
-
-            ### HACK: this is for the all-channels (flattened) DNN
-            # for x_cf_np, y_np in test_inferencer.sample_iter_allchannels(batch_samples=batch_samples, include_targets=True, epoch_seed=None):
-            #     x_cf = torch.from_numpy(x_cf_np).to(device=device, dtype=torch.float32)  # [B,C,F]
-            #     y    = torch.from_numpy(y_np).to(device=device, dtype=torch.float32)     # [B,C]
-
-            #     pred = model(x_cf)  # [B,C]
-            #     loss = masked_mse_bc(pred, y)
-
-            #     if loss.item() == 0.0 and not torch.any(torch.isfinite(pred) & torch.isfinite(y)):
-            #         if show_progbar:
-            #             pbar.update(int(x_cf.shape[0] * cfg.nch))
-            #         continue
-
-            #     sum_vloss += float(loss.item())
-            #     sum_vcount += 1
-
-            #     if show_progbar:
-            #         pbar.set_postfix({"batch_mse": f"{loss.item():.4f}", "steps": sum_vcount})
-            #         pbar.update(int(x_cf.shape[0] * cfg.nch))
-            ### END HACK for all-channels DNN
-
-
-
 
         if show_progbar:
             pbar.close()
@@ -420,20 +340,6 @@ def summarize_nonfinite_tensor_2d(
         lines.append(f"row {r}: " + ", ".join(row_parts) + suffix)
 
     return "\n".join(lines)
-
-def masked_mse_bc(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """
-    pred/target: [B, C]
-    Mask out NaNs in either pred or target.
-    Returns mean over valid entries. If none valid, returns 0.
-    """
-    if pred.ndim != 2 or target.ndim != 2:
-        raise ValueError(f"masked_mse_bc expects [B,C], got pred {tuple(pred.shape)} target {tuple(target.shape)}")
-    valid = torch.isfinite(pred) & torch.isfinite(target)
-    if not torch.any(valid):
-        return pred.new_tensor(0.0)
-    diff = pred[valid] - target[valid]
-    return (diff * diff).mean()
 
 
 def count_samples(inf: "inferencers.AnalysisDNNInferencer", nch_per_event: int) -> int:

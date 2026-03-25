@@ -123,24 +123,11 @@ def add_correction_dnn(cfg, inferencer, nodes: list[int], dropout: float, tag: s
     C = cfg.nch
     print(f"Per-event cols: {input_dim-len(per_channel_cols)} | per-channel cols: {len(per_channel_cols)} | input_dim={input_dim} | C={C}")
 
-    ### HACK: This is for per-channel DNN
     # --- model ---
     model = dnn_models.PerChannelDNN(input_dim=input_dim, nodes_per_layer=nodes, dropout_rate=dropout, tag=tag).to(device)
     state = torch.load(os.path.join(cfg.dnn_models_folder, model.get_model_string(), "dnn_best.pth"), map_location="cpu")
     model.load_state_dict(state)
     model.eval()
-    ### END HACK per-channel
-    ### HACK: this is for DeepSet
-    # evt_dim = input_dim - len(per_channel_cols)   # because each per_channel col contributes 1 feature (per channel)
-    # ch_dim  = len(per_channel_cols)
-    # print(f"[DeepSets] evt_dim={evt_dim} | ch_dim={ch_dim} | C={C}")
-
-    # # --- model ---
-    # model = dnn_models.DeepSetsDNN(evt_dim=evt_dim, ch_dim=ch_dim, phi_nodes=nodes, psi_nodes=nodes, dropout_rate=dropout, tag=tag).to(device)
-    # state = torch.load(os.path.join(cfg.dnn_models_folder, model.get_model_string(), "dnn_best.pth"), map_location="cpu")
-    # model.load_state_dict(state)
-    # model.eval()
-    ### END HACK DeepSet
 
     for idx, df_chunk in enumerate(inferencer.full_df_iter()):
 
@@ -150,11 +137,6 @@ def add_correction_dnn(cfg, inferencer, nodes: list[int], dropout: float, tag: s
         x_evt = df_inputs.drop(columns=per_channel_cols).to_numpy(np.float32, copy=False)
         ch_mats = inferencers.matrices_from_per_channel_cols(per_channel_cols=per_channel_cols, df=df_inputs, nch=cfg.nch)
 
-        ### HACK: this is for DeepSet
-        # x_ch = np.stack([ch_mats[col] for col in per_channel_cols], axis=-1).astype(np.float32, copy=False)
-        ### END HACK DeepSet
-
-        ### HACK: This is for per-channel DNN
         # predictions [E, C]
         preds = np.full((E, C), np.nan, dtype=np.float32)
 
@@ -174,25 +156,6 @@ def add_correction_dnn(cfg, inferencer, nodes: list[int], dropout: float, tag: s
                     out[start:stop] = yb
 
                 preds[:, ch] = out
-        ### END HACK per-channel
-        ### HACK: this is for DeepSet
-        # # predictions [E, C]
-        # preds = np.full((E, C), np.nan, dtype=np.float32)
-
-        # # in this inference function, we want predictions for ALL channels
-        # mask = np.ones((E, C), dtype=bool)
-
-        # with torch.no_grad():
-        #     for start in range(0, E, infer_batch):
-        #         stop = min(start + infer_batch, E)
-
-        #         xevt_b = torch.from_numpy(x_evt[start:stop]).to(device=device, dtype=torch.float32)   # [B,Fevt]
-        #         xch_b  = torch.from_numpy(x_ch[start:stop]).to(device=device, dtype=torch.float32)    # [B,C,Fch]
-        #         mask_b = torch.from_numpy(mask[start:stop]).to(device=device)                          # [B,C] bool
-
-        #         yb = model(xevt_b, xch_b, mask_b).detach().float().cpu().numpy()  # [B,C]
-        #         preds[start:stop, :] = yb
-        ### END HACK DeepSet
 
         meas = df_chunk[columns_to_predict].to_numpy(np.float32, copy=False)
         resids = (meas - preds).astype(np.float32, copy=False)

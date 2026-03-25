@@ -69,7 +69,7 @@ def main() -> None:
             modulename=x, 
             run=args.run,
             run_for_pedestal=args.pedestal_run,
-            standardize_std=args.standardize_std,
+            standardize_std=False,
             inputfoldertag="",
         ) 
         for x in args.modules
@@ -85,18 +85,10 @@ def make_input_df(cfg, df, adc_channel_indices, column_tag):
     cm_columns = [f"cm_erx{idx:02}_pedsub" for idx in range(cfg.ncmchannels)]
     df_inputs = df[cm_columns].copy().astype("float32")
 # 
-    # df_inputs = df[["nchtoa"]].copy()
-    # df_inputs[f"nchtot"] = df["nchtot"]
-
     adc_channel_indices_mean = sum(adc_channel_indices) / len(adc_channel_indices)
 
     erx_indices = [i // cfg.nch_per_erx for i in adc_channel_indices]
     erx_indices_mean = sum(erx_indices) / len(erx_indices)
-
-    # cm_columns_thiserx = [f"cm_erx{idx:02}_pedsub" for idx in erx_indices]
-    # cm_columns_complement = [f"cm_erx{(idx ^ 1):02d}_pedsub" for idx in erx_indices]
-    # df_inputs["cm_thiserx"] = df[cm_columns_thiserx].to_numpy().tolist()
-    # df_inputs["cm_othererxonroc"] = df[cm_columns_complement].to_numpy().tolist()
 
     # channel indices as list, one value per channel
     df_inputs["channel_indices"] = [[x - adc_channel_indices_mean for x in adc_channel_indices]] * len(df_inputs)
@@ -146,14 +138,10 @@ def make_input_df(cfg, df, adc_channel_indices, column_tag):
     for i in range(k):
         df_inputs[f"cm_proj_eigvec_{i}"] = proj_cm[:, i]
 
-    
     # # number of channels with toa and with tot
     df_inputs[f"nchtoa"] = df["nchtoa"]
     df_inputs[f"nchtot"] = df["nchtot"]
     
-
-    # print(df_inputs)
-    # raise ValueError("stop")
     return df_inputs
 
 
@@ -175,7 +163,6 @@ def prepare_dnn_inputs(cfg, column_tag, inferencer, nch_to_use=None):
     for idx, df_chunk in enumerate(inferencer.full_df_iter()):
         df_targets = df_chunk[target_columns].copy().astype("float32")
         df_inputs  = make_input_df(cfg=cfg, df=df_chunk, adc_channel_indices=adc_channel_indices, column_tag=column_tag)
-        # df_inputs = df_inputs.sample(frac=1.0, random_state=123).reset_index(drop=True)
 
         print(df_targets)
         print(df_inputs)
@@ -184,30 +171,6 @@ def prepare_dnn_inputs(cfg, column_tag, inferencer, nch_to_use=None):
         df_targets.to_parquet(os.path.join(cfg.dnn_training_input_folder, f"targets_chunk{idx:03d}.parquet"), engine="pyarrow", index=True, compression="zstd")
         df_inputs.to_parquet(os.path.join(cfg.dnn_training_input_folder, f"inputs_chunk{idx:03d}.parquet"), engine="pyarrow", index=True, compression="zstd")
         event_ids_all.append(df_chunk.index.to_numpy(np.int64))
-
-        # seed = 12345
-        # rng = np.random.default_rng(seed + idx)
-        # n_samples = len(df_chunk) * nch_to_use
-
-        # flat_idx     = rng.permutation(n_samples).astype(np.int64)
-        # # flat_idx     = np.arange(n_samples).astype(np.int64)
-        # event_idx    = (flat_idx // nch_to_use).astype(np.int32)
-        # channel_idx  = (flat_idx %  nch_to_use).astype(np.int16)
-        # event_ids_chunk = df_chunk.index.to_numpy(np.int64)
-        # event_id_per_sample = np.repeat(event_ids_chunk, nch_to_use)[flat_idx]
-
-        # df_shuffle = pd.DataFrame(
-        #     {
-        #         "shuffle_idx": np.arange(n_samples, dtype=np.int64),
-        #         "flat_idx": flat_idx,
-        #         "row_in_chunk": event_idx,
-        #         "channel_id": channel_idx,
-        #         "event_id_global": event_id_per_sample,
-        #     }
-        # )
-        # print(df_shuffle)
-        # # write shuffle chunk
-        # df_shuffle.to_parquet(os.path.join(cfg.dnn_training_input_folder, f"shuffle_chunk{idx:03d}.parquet"), engine="pyarrow", index=False, compression="zstd")
 
     event_ids = np.unique(np.concatenate(event_ids_all))
     rng_split = np.random.default_rng(6789)
@@ -225,7 +188,7 @@ def prepare_dnn_inputs(cfg, column_tag, inferencer, nch_to_use=None):
     df_split.to_parquet(os.path.join(cfg.dnn_training_input_folder, "event_split_train_test.parquet"), index=False, compression="zstd")
     print(df_split)
 
-    print(f"--> Wrote input, target, shuffle, and split DFs to: {cfg.dnn_training_input_folder}")
+    print(f"--> Wrote input, target, and split DFs to: {cfg.dnn_training_input_folder}")
 
 
 

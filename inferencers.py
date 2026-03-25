@@ -3,8 +3,6 @@ import numpy as np # type: ignore
 import pandas as pd # type: ignore
 from typing import Optional
 
-from sklearn.model_selection import train_test_split # type: ignore
-
 import classes
 
 
@@ -88,57 +86,6 @@ class AnalysisDNNInferencer:
         # Map: event_id_global -> "train"/"test"
         self.split_map = dict(zip(df_split["event_id_global"].to_numpy(dtype=np.int64), df_split["split"].astype(str).to_numpy()))
 
-    # def apply_split(self, batch: classes.DNNBatch) -> classes.DNNBatch:
-    #     df_inputs  = batch.df_inputs
-    #     df_targets = batch.df_targets
-    #     df_shuffle = batch.df_shuffle
-
-    #     if "event_id_global" not in df_shuffle.columns:
-    #         raise KeyError("Shuffle df missing required column 'event_id_global'")
-
-    #     # --- strict unknown-ID check on shuffle
-    #     ev_shuffle = df_shuffle["event_id_global"].to_numpy(np.int64, copy=False)
-    #     unknown = [e for e in set(map(int, np.unique(ev_shuffle))) if e not in self.split_map]
-    #     if unknown:
-    #         raise KeyError(f"Unknown event_id_global(s) not found in split map (showing up to 10): {unknown[:10]}")
-
-    #     ev_inputs = df_inputs.index.to_numpy(np.int64, copy=False)
-    #     unknown_inputs = [e for e in set(map(int, np.unique(ev_inputs))) if e not in self.split_map]
-    #     if unknown_inputs:
-    #         raise KeyError(f"Unknown event_id_global(s) in inputs index (showing up to 10): {unknown_inputs[:10]}")
-
-    #     ev_targets = df_targets.index.to_numpy(np.int64, copy=False)
-    #     unknown_targets = [e for e in set(map(int, np.unique(ev_targets))) if e not in self.split_map]
-    #     if unknown_targets:
-    #         raise KeyError(f"Unknown event_id_global(s) in targets index (showing up to 10): {unknown_targets[:10]}")
-
-    #     # no split filtering requested -> return as-is
-    #     if not self.split:
-    #         return classes.DNNBatch(cfg=batch.cfg, df_inputs=df_inputs, df_targets=df_targets, df_shuffle=df_shuffle)
-
-    #     # --- 1) filter events in inputs/targets by split ---
-    #     keep_mask = np.asarray(pd.Index(ev_inputs).map(self.split_map) == self.split, dtype=bool)
-
-    #     # indices (old row numbers) of kept events in this chunk
-    #     kept_old_rows = np.nonzero(keep_mask)[0]               # e.g. [0,2,5,...] in 0..Nevt-1
-    #     df_inputs_f   = df_inputs.iloc[keep_mask]
-    #     df_targets_f  = df_targets.loc[df_inputs_f.index]
-    #     df_shuffle   = df_shuffle[df_shuffle["event_id_global"].map(self.split_map) == self.split]
-
-    #     # --- 2) remap shuffle's row_in_chunk to the new compressed row numbering ---
-    #     # old -> new mapping; size ~ Nevt, cheap
-    #     old_to_new = {int(old): int(new) for new, old in enumerate(kept_old_rows)}
-
-    #     # keep only shuffle samples whose row_in_chunk survived, AND remap row_in_chunk
-    #     rows = df_shuffle["row_in_chunk"].to_numpy(np.int64, copy=False)
-    #     keep_samples = np.fromiter((int(r) in old_to_new for r in rows), dtype=bool, count=len(rows))
-    #     df_shuffle_f = df_shuffle.loc[keep_samples].copy()
-
-    #     # remap row_in_chunk in-place
-    #     df_shuffle_f["row_in_chunk"] = df_shuffle_f["row_in_chunk"].map(old_to_new).astype(np.int64)
-
-    #     return classes.DNNBatch(cfg=batch.cfg, df_inputs=df_inputs_f, df_targets=df_targets_f, df_shuffle=df_shuffle_f)
-
     def apply_split(self, batch: classes.DNNBatch) -> classes.DNNBatch:
         df_inputs  = batch.df_inputs
         df_targets = batch.df_targets
@@ -163,144 +110,6 @@ class AnalysisDNNInferencer:
         for batch in self.batches:
             yield self.apply_split(batch).full_inputs_df
 
-    # def full_targets_iter(self):
-    #     for batch in self.batches:
-    #         yield self.apply_split(batch).full_targets_df
-
-    # def shuffle_iter(self):
-    #     for batch in self.batches:
-    #         yield self.apply_split(batch).full_shuffle_df
-
-    # --- iterator used for training ---
-    # def sample_iter(self, batch_samples: int=8192, include_targets: bool=True, epoch_seed=None):
-    #     """
-    #     Yield per-(event,channel) batches compatible with PerChannelDNN:
-
-    #         x: [N, F] where F = ncmchannels + 1 (channel index feature)
-    #         y: [N]    target adc value for that sample
-
-    #     Channel index feature is read from df_inputs["channel_indices"] per row
-    #     """
-    #     for batch in self.batches:
-    #         b = self.apply_split(batch)
-    #         # b = batch
-
-    #         if len(b.df_inputs) == 0 or len(b.df_shuffle) == 0:
-    #             continue
-            
-    #         if self.per_event_cols is None:
-    #             self.per_event_cols = [c for c in b.df_inputs.columns if c not in self.per_channel_cols]
-
-    #         # per-event inputs
-    #         X_evt = b.df_inputs[self.per_event_cols].to_numpy(np.float32, copy=False)  # [Nevt, 12]
-
-    #         # materialize each per-channel list-column to dense [Nevt, C] once per chunk
-    #         ch_mats = matrices_from_per_channel_cols(per_channel_cols=self.per_channel_cols, df=b.df_inputs, nch=self.cfg.nch)
-
-    #         # per-event targets (optional)
-    #         if include_targets:
-    #             Y_evt = b.df_targets.to_numpy(np.float32, copy=False)  # [Nevt, C]
-
-    #         ### HACK: shuffle now, not using external file
-    #         # all_indices = np.arange(b.df_targets.shape[0] * b.df_targets.shape[1])
-    #         # train_indices, val_indices = train_test_split(
-    #         #     all_indices,
-    #         #     test_size=0.2,
-    #         #     random_state=42,
-    #         #     shuffle=True
-    #         # )
-
-    #         # if self.split == "train":
-    #         #     rows = (train_indices // 222).astype(np.int32)
-    #         #     chs = (train_indices % 222).astype(np.int32)
-    #         # elif self.split == "test":
-    #         #     rows = (val_indices // 222).astype(np.int32)
-    #         #     chs = (val_indices % 222).astype(np.int32)
-    #         # else:
-    #         #     raise ValueError("???")
-
-    #         # forced_channels = np.array([8, 17, 19, 28, 45, 54, 56, 65, 82, 91, 93, 102, 119, 128, 130, 139, 156, 165, 167, 176, 193, 202, 204, 213], dtype=np.int64)  
-    #         # rows = np.arange(b.df_inputs.shape[0], dtype=np.int64)[:, None]          # (nrows, 1)
-    #         # chs = forced_channels[None, :]                            # (1, nforced)
-    #         # forced_indices = (rows * b.df_targets.shape[1] + chs).ravel()                # (nrows * nforced,)
-
-    #         # # ------------------------------
-    #         # # Remove forced channels from val/test
-    #         # # ------------------------------
-    #         # val_chs = val_indices % b.df_targets.shape[1]
-    #         # val_indices = val_indices[~np.isin(val_chs, forced_channels)]
-
-    #         # # ------------------------------
-    #         # # Add forced channels to train
-    #         # # ------------------------------
-    #         # train_indices = np.unique(
-    #         #     np.concatenate([train_indices, forced_indices])
-    #         # )
-
-    #         # # ------------------------------
-    #         # # Final row / channel arrays
-    #         # # ------------------------------
-    #         # if self.split == "train":
-    #         #     idx = train_indices
-    #         # elif self.split == "test":
-    #         #     idx = val_indices
-    #         # else:
-    #         #     raise ValueError("split must be 'train' or 'test'")
-
-    #         # rows = (idx // b.df_targets.shape[1]).astype(np.int32)
-    #         # chs  = (idx %  b.df_targets.shape[1]).astype(np.int32)
-
-    #         #### HACK End
-
-    #         # # shuffle-defined samples
-    #         # rows = b.df_shuffle["row_in_chunk"].to_numpy(np.int64, copy=False)
-    #         # chs  = b.df_shuffle["channel_id"].to_numpy(np.int64, copy=False)
-
-    #         # # different shuffling every epoch when setting epoch_seed
-    #         # if epoch_seed is not None:
-    #         #     rng  = np.random.default_rng(epoch_seed)
-    #         #     perm = rng.permutation(len(rows))
-    #         #     rows = rows[perm]
-    #         #     chs  = chs[perm]
-
-    #         # n = len(rows)
-    #         # for start in range(0, n, batch_samples):
-    #         #     sl = slice(start, min(start + batch_samples, n))
-    #         #     rr = rows[sl]
-    #         #     cc = chs[sl]
-    #             # print("picking row/channel:\n", rr, "\n", cc)
-
-    #         # different shuffling every epoch when setting epoch_seed
-    #         n = b.df_inputs.shape[0]
-    #         c = b.df_targets.shape[1]
-    #         chs = np.asarray([x for x in range(c)], dtype=np.int64)
-    #         rows = np.asarray([x for x in range(n)], dtype=np.int64)
-
-    #         if epoch_seed is not None:
-    #             rng  = np.random.default_rng(epoch_seed)
-    #             perm = rng.permutation(n)
-    #             rows = rows[perm]
-
-    #         for start in range(0, n, batch_samples):
-    #             sl = slice(start, min(start + batch_samples, n))
-    #             rows_thisslice = rows[sl]
-
-    #             cc = np.tile(chs, len(rows_thisslice))
-    #             rr = np.repeat(rows_thisslice, c)
-    #             # print("picking row/channel:\n", rr, "\n", cc)
-
-    #             # build per-channel features for these samples: each -> [N,1]
-    #             ch_feats = [ch_mats[c][rr, cc][:, None] for c in self.per_channel_cols]
-
-    #             # final x: [N, Fevt + Fch]
-    #             x = np.concatenate([X_evt[rr]] + ch_feats, axis=1).astype(np.float32, copy=False)
-
-    #             if include_targets:
-    #                 y = Y_evt[rr, cc].astype(np.float32, copy=False)
-    #                 yield x, y
-    #             else:
-    #                 yield x
-
     def sample_iter(self, batch_samples: int=8192, include_targets: bool=True, epoch_seed=None):
         for batch in self.batches:
             b = batch
@@ -322,21 +131,9 @@ class AnalysisDNNInferencer:
             if include_targets:
                 Y_evt = b.df_targets.to_numpy(np.float32, copy=False)  # [Nevt, C]
 
-            # ------------------------------
-            # define special channels
-            # ------------------------------
-            special_channels = np.array(
-                # [8, 17, 19, 28, 45, 54, 56, 65, 82, 91, 93, 102, 119, 128, 130, 139, 156, 165, 167, 176, 193, 202, 204, 213],
-                [],
-                dtype=np.int64,
-            )
-            special_set = set(map(int, special_channels.tolist()))
-            
             c = b.df_targets.shape[1]
             all_chs = np.arange(c, dtype=np.int64)
-            
-            non_special_channels = np.array([ch for ch in all_chs if int(ch) not in special_set], dtype=np.int64)
-            
+
             # ------------------------------
             # event split mask for this chunk
             # ------------------------------
@@ -374,26 +171,11 @@ class AnalysisDNNInferencer:
                 rows_test  = rows_this[is_test_evt[rows_this]]
             
                 if self.split == "train":
-                    # 1) all channels for train events
-                    rr1 = np.repeat(rows_train, c)
-                    cc1 = np.tile(all_chs, len(rows_train))
-                    
-                    # 2) ONLY special channels for test events (migrated into train)
-                    rr2 = np.repeat(rows_test, len(special_channels))
-                    cc2 = np.tile(special_channels, len(rows_test))
-                    
-                    rr = np.concatenate([rr1, rr2], axis=0)
-                    cc = np.concatenate([cc1, cc2], axis=0)
-    
-                    # # ONLY non-special channels for train events
-                    # rr = np.repeat(rows_train, len(non_special_channels))
-                    # cc = np.tile(non_special_channels, len(rows_train))
-            
+                    rr = np.repeat(rows_train, c)
+                    cc = np.tile(all_chs, len(rows_train))
                 elif self.split == "test":
-                    # ONLY non-special channels for test events
-                    rr = np.repeat(rows_test, len(non_special_channels))
-                    cc = np.tile(non_special_channels, len(rows_test))
-            
+                    rr = np.repeat(rows_test, c)
+                    cc = np.tile(all_chs, len(rows_test))
                 else:
                     raise ValueError("split must be 'train' or 'test'")
             
@@ -510,7 +292,5 @@ def matrices_from_per_channel_cols(per_channel_cols, df, nch):
         if c not in df.columns:
             raise KeyError(f"Missing per-channel column '{c}' in inputs df.")
         mat = np.vstack(df[c].to_numpy()).astype(np.float32, copy=False)
-        # if mat.shape[1] != nch:
-        #     raise ValueError(f"Column '{c}' has wrong length: expected {nch}, got {mat.shape[1]}")
         mats[c] = mat
     return mats
