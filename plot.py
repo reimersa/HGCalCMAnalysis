@@ -193,18 +193,6 @@ def plot(cfg, inferencer, column_tag, selection) -> None:
 
 
 
-    # # channel196 vs. unconnected
-    # functions_plot.plot_2d_multicol_vs_var(varname_x="adc_ch008_pedsub", varname_y_template=f"adc_ch196_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_disconnected", method_subfolder), nbins_y=80, y_range=yrange)
-    # functions_plot.plot_2d_multicol_vs_var(varname_x="adc_ch017_pedsub", varname_y_template=f"adc_ch196_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_disconnected", method_subfolder), nbins_y=80, y_range=yrange)
-    # functions_plot.plot_2d_multicol_vs_var(varname_x="adc_ch019_pedsub", varname_y_template=f"adc_ch196_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_disconnected", method_subfolder), nbins_y=80, y_range=yrange)
-    # functions_plot.plot_2d_multicol_vs_var(varname_x="adc_ch028_pedsub", varname_y_template=f"adc_ch196_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_disconnected", method_subfolder), nbins_y=80, y_range=yrange)
-    # functions_plot.plot_2d_multicol_vs_var(varname_x="adc_ch193_pedsub", varname_y_template=f"adc_ch196_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_disconnected", method_subfolder), nbins_y=80, y_range=yrange)
-    # functions_plot.plot_2d_multicol_vs_var(varname_x="adc_ch202_pedsub", varname_y_template=f"adc_ch196_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_disconnected", method_subfolder), nbins_y=80, y_range=yrange)
-    # functions_plot.plot_2d_multicol_vs_var(varname_x="adc_ch204_pedsub", varname_y_template=f"adc_ch196_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_disconnected", method_subfolder), nbins_y=80, y_range=yrange)
-    # functions_plot.plot_2d_multicol_vs_var(varname_x="adc_ch213_pedsub", varname_y_template=f"adc_ch196_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_disconnected", method_subfolder), nbins_y=80, y_range=yrange)
-
-
-
 
 
 
