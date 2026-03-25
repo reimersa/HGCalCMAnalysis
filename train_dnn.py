@@ -66,44 +66,36 @@ def main():
         train_dnn(cfg=cfg, noprogbar=args.noprogbar, per_channel_cols=args.per_channel_cols, nodes=args.nodes, dropout=args.dropout, tag=args.tag, override_name=args.override_name, new_name=args.new_name, batch_samples=args.batch_samples, epochs=args.epochs)
 
 
+
+
 def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_samples, epochs, override_name=False, new_name="TESTTEST") -> None:
     show_progbar = not noprogbar
 
+    # Device and split-specific data streams.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # One train/test inferencer per module; we stream across modules sequentially (simple + minimal).
     train_inferencer = inferencers.AnalysisDNNInferencer(cfg=cfg, split="train", per_channel_cols=per_channel_cols)
     test_inferencer  = inferencers.AnalysisDNNInferencer(cfg=cfg, split="test", per_channel_cols=per_channel_cols)
 
-    # --- infer input_dim from first yielded batch ---
-    probe_x = None
-    for x, y in train_inferencer.sample_iter(batch_samples=batch_samples, include_targets=True):
-        probe_x = x
-        break
-    if probe_x is None:
-        raise RuntimeError("Could not probe input_dim: no samples yielded from train split.")
-    input_dim = int(probe_x.shape[1])
+    # Probe one batch to determine the model input shape.
+    input_dim, feature_names = infer_input_dim_and_feature_names(
+        train_inferencer=train_inferencer,
+        batch_samples=batch_samples,
+        per_channel_cols=per_channel_cols,
+    )
     print(f"Detected input_dim = {input_dim}")
-    feature_names = None
-    per_event_cols = getattr(train_inferencer, "per_event_cols", None)
-    if per_event_cols is not None:
-        feature_names = list(per_event_cols) + list(per_channel_cols)
-        if len(feature_names) != input_dim:
-            print(
-                f"[warning] Feature-name count mismatch: len(feature_names)={len(feature_names)} vs input_dim={input_dim}; "
-                "using positional labels in non-finite diagnostics."
-            )
-            feature_names = None
     
-    # --- model ---
-    model = dnn_models.PerChannelDNN(input_dim=input_dim, nodes_per_layer=nodes, dropout_rate=dropout, tag=tag).to(device)
-    # criterion = MSEPlusOffDiagFracLossFlatOrdered(eps=1e-12, lam=10.0)
-    # criterion = GlobalCoherentNoiseLossFlatOrdered()
+    model = build_model(
+        input_dim=input_dim,
+        nodes=nodes,
+        dropout=dropout,
+        tag=tag,
+        override_name=override_name,
+        new_name=new_name,
+    ).to(device)
 
-    if override_name:
-        model.override_model_string(new_name)
-
+    # Resolve output location from the final model name.
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model: {model.get_model_string()} ({n_params:,} trainable params)")
 
@@ -111,11 +103,11 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
     os.makedirs(modelfolder, exist_ok=False)
     print(f"Writing outputs to: {modelfolder}")
 
-    # --- optimizer / scheduler ---
+    # Optimizer and LR schedule.
     optimizer = torch.optim.Adam(model.parameters(), lr=float(1e-3))
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-6)
 
-    # --- counts for progress bars ---
+    # Sample counts are only used for progress bars.
     if show_progbar:
         n_train = count_samples(train_inferencer, nch_per_event=cfg.nch)
         n_test = count_samples(test_inferencer, nch_per_event=cfg.nch)
@@ -131,117 +123,47 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
         print(f"\n--- epoch {epoch+1}/{epochs} ---")
         t0 = time.time()
 
-        # -----------------
-        # TRAIN
-        # -----------------
-        model.train()
-        sum_loss = 0.0
-        sum_count = 0  # number of optimizer steps that had >=1 valid sample
-
-        if show_progbar:
-            pbar = tqdm(total=n_train, desc="Training", unit="samples", leave=False, dynamic_ncols=True)
-
-        train_epoch = 0
-
-        for x_np, y_np in train_inferencer.sample_iter(batch_samples=batch_samples, include_targets=True, epoch_seed=epoch):
-            x = torch.from_numpy(x_np).to(device=device, dtype=torch.float32)
-            y = torch.from_numpy(y_np).to(device=device, dtype=torch.float32)
-
-            if not torch.isfinite(x).all():
-                detail = summarize_nonfinite_tensor_2d(x, tensor_name="x", feature_names=feature_names)
-                raise RuntimeError(f"Non-finite inputs detected before making predictions.\n{detail}")
-        
-            optimizer.zero_grad(set_to_none=True)
-            pred = model(x)  # [N]
-
-            if not torch.isfinite(pred).all():
-                raise RuntimeError("Non-finite prediction detected before loss.")
-
-            loss = masked_mse(pred, y)
-            if not torch.isfinite(loss):
-                raise RuntimeError("Non-finite loss detected.")
-        
-            if loss.item() == 0.0 and not torch.any(torch.isfinite(pred) & torch.isfinite(y)):
-                if show_progbar:
-                    pbar.update(int(x.shape[0]))
-                continue
-        
-            loss.backward()
-            for n, p in model.named_parameters():
-                if p.grad is not None and not torch.isfinite(p.grad).all():
-                    raise RuntimeError(f"Non-finite grad in {n}")
-
-            optimizer.step()
-            for n, p in model.named_parameters():
-                if not torch.isfinite(p).all():
-                    print(f"[after step] non-finite parameter in {n}")
-                    print("sample values:", p.detach().flatten()[:20].cpu())
-                    raise RuntimeError(f"Non-finite parameter after optimizer.step(): {n}")
-
-        
-            sum_loss += float(loss.item())
-            sum_count += 1
-        
-            if show_progbar:
-                pbar.set_postfix({"batch_mse": f"{loss.item():.4f}", "steps": sum_count})
-                pbar.update(int(x.shape[0]))
-        
-            train_epoch += 1
-
-
-
-        if show_progbar:
-            pbar.close()
-
-        train_loss = (sum_loss / max(1, sum_count))
+        # Training pass.
+        train_loss = run_train_epoch(
+            model=model,
+            inferencer=train_inferencer,
+            optimizer=optimizer,
+            device=device,
+            batch_samples=batch_samples,
+            epoch=epoch,
+            feature_names=feature_names,
+            show_progbar=show_progbar,
+            n_total=n_train if show_progbar else None,
+        )
         train_losses.append(train_loss)
 
-        # -----------------
-        # TEST
-        # -----------------
-        model.eval()
-        sum_vloss = 0.0
-        sum_vcount = 0
-
-        if show_progbar:
-            pbar = tqdm(total=n_test, desc="Validation", unit="samples", leave=False, dynamic_ncols=True)
-
-        with torch.no_grad():
-            for x_np, y_np in test_inferencer.sample_iter(batch_samples=batch_samples, include_targets=True):
-                x = torch.from_numpy(x_np).to(device=device, dtype=torch.float32)
-                y = torch.from_numpy(y_np).to(device=device, dtype=torch.float32)
-            
-                pred = model(x)
-                loss = masked_mse(pred, y)
-            
-                if loss.item() == 0.0 and not torch.any(torch.isfinite(pred) & torch.isfinite(y)):
-                    if show_progbar:
-                        pbar.update(int(x.shape[0]))
-                    continue
-            
-                sum_vloss += float(loss.item())
-                sum_vcount += 1
-            
-                if show_progbar:
-                    pbar.set_postfix({"batch_mse": f"{loss.item():.4f}", "steps": sum_vcount})
-                    pbar.update(int(x.shape[0]))
-
-        if show_progbar:
-            pbar.close()
-
-        test_loss = (sum_vloss / max(1, sum_vcount))
+        # Validation pass.
+        test_loss = run_eval_epoch(
+            model=model,
+            inferencer=test_inferencer,
+            device=device,
+            batch_samples=batch_samples,
+            show_progbar=show_progbar,
+            n_total=n_test if show_progbar else None,
+        )
         test_losses.append(test_loss)
 
-        # scheduler for early stopping
+        # Update LR from validation loss.
         scheduler.step(test_loss)
         lr = optimizer.param_groups[0]["lr"]
         print(f"[epoch {epoch+1}] lr = {lr:.2e}")
 
-        # checkpointing
+        # Save checkpoints and apply early stopping on validation loss.
         if test_loss < best_test:
             best_test = test_loss
             patience = 0
-            torch.save(model.state_dict(), os.path.join(modelfolder, "dnn_best.pth"))
+            save_training_state(
+                modelfolder=modelfolder,
+                model=model,
+                train_losses=train_losses,
+                test_losses=test_losses,
+                is_best=True,
+            )
             print(f"New best model saved (test={test_loss:.6f}).")
         else:
             patience += 1
@@ -250,9 +172,13 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
                 print("Early stopping.")
                 break
 
-        torch.save(model.state_dict(), os.path.join(modelfolder, "dnn_last.pth"))
-        np.save(os.path.join(modelfolder, "train_losses.npy"), np.asarray(train_losses, dtype=np.float64))
-        np.save(os.path.join(modelfolder, "test_losses.npy"), np.asarray(test_losses, dtype=np.float64))
+        save_training_state(
+            modelfolder=modelfolder,
+            model=model,
+            train_losses=train_losses,
+            test_losses=test_losses,
+            is_best=False,
+        )
 
         dt = time.time() - t0
         print(f"Epoch {epoch+1} | train {train_loss:.4f} | test {test_loss:.4f} | time {dt:.1f}s")
@@ -260,6 +186,158 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
     print(f"Training completed. Outputs in: {modelfolder}")
 
 
+
+
+
+def build_model(input_dim: int, nodes, dropout, tag, override_name=False, new_name="TESTTEST"):
+    model = dnn_models.PerChannelDNN(
+        input_dim=input_dim,
+        nodes_per_layer=nodes,
+        dropout_rate=dropout,
+        tag=tag,
+    )
+    if override_name:
+        model.override_model_string(new_name)
+    return model
+
+
+def infer_input_dim_and_feature_names(train_inferencer, batch_samples, per_channel_cols):
+    probe_x = None
+    for x, y in train_inferencer.sample_iter(batch_samples=batch_samples, include_targets=True):
+        probe_x = x
+        break
+    if probe_x is None:
+        raise RuntimeError("Could not probe input_dim: no samples yielded from train split.")
+
+    input_dim = int(probe_x.shape[1])
+    feature_names = None
+    per_event_cols = getattr(train_inferencer, "per_event_cols", None)
+    if per_event_cols is not None:
+        feature_names = list(per_event_cols) + list(per_channel_cols)
+        if len(feature_names) != input_dim:
+            print(
+                f"[warning] Feature-name count mismatch: len(feature_names)={len(feature_names)} vs input_dim={input_dim}; "
+                "using positional labels in non-finite diagnostics."
+            )
+            feature_names = None
+    return input_dim, feature_names
+
+
+def run_train_epoch(
+    model,
+    inferencer,
+    optimizer,
+    device,
+    batch_samples,
+    epoch,
+    feature_names,
+    show_progbar=False,
+    n_total=None,
+):
+    model.train()
+    sum_loss = 0.0
+    sum_count = 0
+
+    pbar = None
+    if show_progbar:
+        pbar = tqdm(total=n_total, desc="Training", unit="samples", leave=False, dynamic_ncols=True)
+
+    for x_np, y_np in inferencer.sample_iter(batch_samples=batch_samples, include_targets=True, epoch_seed=epoch):
+        x = torch.from_numpy(x_np).to(device=device, dtype=torch.float32)
+        y = torch.from_numpy(y_np).to(device=device, dtype=torch.float32)
+
+        if not torch.isfinite(x).all():
+            detail = summarize_nonfinite_tensor_2d(x, tensor_name="x", feature_names=feature_names)
+            raise RuntimeError(f"Non-finite inputs detected before making predictions.\n{detail}")
+
+        optimizer.zero_grad(set_to_none=True)
+        pred = model(x)
+
+        if not torch.isfinite(pred).all():
+            raise RuntimeError("Non-finite prediction detected before loss.")
+
+        loss = masked_mse(pred, y)
+        if not torch.isfinite(loss):
+            raise RuntimeError("Non-finite loss detected.")
+
+        if loss.item() == 0.0 and not torch.any(torch.isfinite(pred) & torch.isfinite(y)):
+            if pbar is not None:
+                pbar.update(int(x.shape[0]))
+            continue
+
+        loss.backward()
+        for n, p in model.named_parameters():
+            if p.grad is not None and not torch.isfinite(p.grad).all():
+                raise RuntimeError(f"Non-finite grad in {n}")
+
+        optimizer.step()
+        for n, p in model.named_parameters():
+            if not torch.isfinite(p).all():
+                print(f"[after step] non-finite parameter in {n}")
+                print("sample values:", p.detach().flatten()[:20].cpu())
+                raise RuntimeError(f"Non-finite parameter after optimizer.step(): {n}")
+
+        sum_loss += float(loss.item())
+        sum_count += 1
+
+        if pbar is not None:
+            pbar.set_postfix({"batch_mse": f"{loss.item():.4f}", "steps": sum_count})
+            pbar.update(int(x.shape[0]))
+
+    if pbar is not None:
+        pbar.close()
+
+    return sum_loss / max(1, sum_count)
+
+
+def run_eval_epoch(
+    model,
+    inferencer,
+    device,
+    batch_samples,
+    show_progbar=False,
+    n_total=None,
+):
+    model.eval()
+    sum_vloss = 0.0
+    sum_vcount = 0
+
+    pbar = None
+    if show_progbar:
+        pbar = tqdm(total=n_total, desc="Validation", unit="samples", leave=False, dynamic_ncols=True)
+
+    with torch.no_grad():
+        for x_np, y_np in inferencer.sample_iter(batch_samples=batch_samples, include_targets=True):
+            x = torch.from_numpy(x_np).to(device=device, dtype=torch.float32)
+            y = torch.from_numpy(y_np).to(device=device, dtype=torch.float32)
+
+            pred = model(x)
+            loss = masked_mse(pred, y)
+
+            if loss.item() == 0.0 and not torch.any(torch.isfinite(pred) & torch.isfinite(y)):
+                if pbar is not None:
+                    pbar.update(int(x.shape[0]))
+                continue
+
+            sum_vloss += float(loss.item())
+            sum_vcount += 1
+
+            if pbar is not None:
+                pbar.set_postfix({"batch_mse": f"{loss.item():.4f}", "steps": sum_vcount})
+                pbar.update(int(x.shape[0]))
+
+    if pbar is not None:
+        pbar.close()
+
+    return sum_vloss / max(1, sum_vcount)
+
+
+def save_training_state(modelfolder, model, train_losses, test_losses, is_best=False):
+    if is_best:
+        torch.save(model.state_dict(), os.path.join(modelfolder, "dnn_best.pth"))
+    torch.save(model.state_dict(), os.path.join(modelfolder, "dnn_last.pth"))
+    np.save(os.path.join(modelfolder, "train_losses.npy"), np.asarray(train_losses, dtype=np.float64))
+    np.save(os.path.join(modelfolder, "test_losses.npy"), np.asarray(test_losses, dtype=np.float64))
 
 
 def masked_mse(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
