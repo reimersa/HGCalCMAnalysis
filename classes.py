@@ -98,6 +98,7 @@ class AnalysisConfig:
     pedestal_mean_std_folder: str = None
     pedestal_covs_folder: str = None
     own_covs_folder: str = None
+    noise_model_fit_folder: str = None
     analytic_predictor_folder: str = None
     plotfolder_base: str = None
 
@@ -111,6 +112,7 @@ class AnalysisConfig:
         self.analysis_inputs_folder          = os.path.join(self.datafolder_base, f"Run{self.run}/analysis_inputs{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}/corrections_from_Run{self.run_for_correction}")
         self.pedestal_mean_std_folder        = os.path.join(self.datafolder_base, f"Run{self.run_for_pedestal}/means_stds{self.inputfoldertag}/{self.modulename}")
         self.own_covs_folder                 = os.path.join(self.datafolder_base, f"Run{self.run}/covs{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}/corrections_from_Run{self.run_for_correction}")
+        self.noise_model_fit_folder          = os.path.join(self.own_covs_folder, "noise_model_fits")
 
         self.corrections_base_folder   = os.path.join(self.datafolder_base, f"corrections{self.inputfoldertag}", self.modulename, f"pedestals_from_Run{self.run_for_pedestal}", f"corrections_from_Run{self.run_for_correction}")
         self.analytic_predictor_folder = os.path.join(self.corrections_base_folder, "predictors")
@@ -120,15 +122,17 @@ class AnalysisConfig:
 
 
 
-        self.is_pedestal = self.run in [110398, 112044, 1747296821, "112044_112050", "112044_112050_full", "112050_adcmax50", "112050_adcmax10", "112044_112050_112060_112073_adcmax10"]
+        self.is_pedestal = self.run in [110398, 112044, 1747296821, "112044_112050", "112044_112050_full", "112044_112050_112060_112073_adcmax10"]
 
         self.runs_per_synthetic_run = {
             "112050_adcmax50": [112050],
             "112050_adcmax10": [112050],
+            "112051_adcmax10": [112051],
             "112044_112050": [112044, 112050],
             "112044_112050_full": [112044, 112050],
             "112073_outer": [112073],
             "112060_outer": [112060],
+            "112068_adcmax10": [112068],
             "112044_112050_112060_112073_adcmax10": [112044, 112050, 112060, 112073]
         }
 
@@ -146,6 +150,8 @@ class AnalysisConfig:
         self.adcmax_per_run = {
             "112050_adcmax50": 50,
             "112050_adcmax10": 10,
+            "112051_adcmax10": 10,
+            "112068_adcmax10": 10,
             "112044_112050_112060_112073_adcmax10": 10
         }
         self.adcmax = None
@@ -172,6 +178,9 @@ class AnalysisConfig:
     def load_from_cov_folder(self, filename):
         return pd.read_parquet(os.path.join(self.own_covs_folder, filename))
 
+    def load_from_noise_model_fit_folder(self, filename):
+        return pd.read_parquet(os.path.join(self.noise_model_fit_folder, filename))
+
     def load_from_corrections_cov_folder(self, filename):
         return pd.read_parquet(os.path.join(self.corrections_covs_folder, filename))
 
@@ -197,16 +206,18 @@ class CovAccumulator:
     """
     Streaming covariance between two matrices X_i and X_j with matching rows (events),
     possibly different columns (channels/features).
-    It accumulates S = sum(X_i^T X_j) and N = sum(M_i^T M_j), with NaN-aware masks,
-    and returns C = S / N as a DataFrame with proper labels.
+    It accumulates the pairwise-valid counts, sums, and sum-of-products needed for a
+    NaN-aware, pairwise-centered covariance estimate.
     """
     def __init__(self, cols_i: List[str], cols_j: List[str]):
         self.cols_i = list(cols_i)
         self.cols_j = list(cols_j)
         self.n_i = len(self.cols_i)
         self.n_j = len(self.cols_j)
-        self.S = np.zeros((self.n_i, self.n_j), dtype=float)
         self.N = np.zeros((self.n_i, self.n_j), dtype=float)
+        self.Sxy = np.zeros((self.n_i, self.n_j), dtype=float)
+        self.Sx = np.zeros((self.n_i, self.n_j), dtype=float)
+        self.Sy = np.zeros((self.n_i, self.n_j), dtype=float)
 
     def update(self, df_i: pd.DataFrame, df_j: pd.DataFrame) -> None:
         # sanity
@@ -221,13 +232,21 @@ class CovAccumulator:
         X_i = df_i.fillna(0.0).to_numpy()
         X_j = df_j.fillna(0.0).to_numpy()
 
-        # accumulate
-        self.S += X_i.T @ X_j
+        # Pairwise-valid accumulators:
+        # - N(i,j): number of rows where both entries are present
+        # - Sx(i,j): sum of x_i over rows where y_j is present
+        # - Sy(i,j): sum of y_j over rows where x_i is present
+        # - Sxy(i,j): sum of x_i*y_j over rows where both are present
         self.N += M_i.T @ M_j
+        self.Sx += X_i.T @ M_j
+        self.Sy += M_i.T @ X_j
+        self.Sxy += X_i.T @ X_j
 
     def finalize(self) -> pd.DataFrame:
         with np.errstate(invalid="ignore", divide="ignore"):
-            C = self.S / self.N
+            mean_x = self.Sx / self.N
+            mean_y = self.Sy / self.N
+            C = (self.Sxy / self.N) - (mean_x * mean_y)
         C = np.nan_to_num(C, nan=0.0, posinf=0.0, neginf=0.0)
         return pd.DataFrame(C, index=self.cols_i, columns=self.cols_j)
 

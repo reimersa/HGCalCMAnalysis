@@ -8,6 +8,7 @@ import functions_plot
 import calculate_means_stds
 import convert_to_df
 import compute_covariances_and_eigen
+import fit_covariance_noise_model
 import compute_predictor_analytic
 import add_correction_analytic
 import add_vars_and_selections
@@ -37,18 +38,22 @@ def main():
     # selection = "selection_toa10to20"
     # selection = "selection_toa20to30"
 
+    n_coherent_noise_model = 3
+
 
     cfgs = [classes.AnalysisConfig(
             modulename=x, 
             # run=112044,
             # run="112044_112050",
             # run="112044_112050_full",
-            # run = "112050_adcmax10",
             # run = "112044_112050_112060_112073_adcmax10",
-            run=112050, # 300 GeV
+            # run=112050, # 300 GeV
+            # run = "112050_adcmax10",
+            # run=112051, # 300 GeV
             # run=112060, # 100 GeV
             # run=112068, # 50 GeV
-            # run=112051, # 300 GeV
+            run="112068_adcmax10", # 50 GeV
+            # run=112073, # 20 GeV
             # run="112073_outer",
             # run="112060_outer",
 
@@ -67,21 +72,25 @@ def main():
 
         # if cfg.is_pedestal:
         #     calculate_means_stds.calculate_means_stds(cfg=cfg, print_vals=True)
-        # if isinstance(cfg.run, int):
-        #     convert_to_df.convert_to_df(cfg=cfg, adcmax=cfg.adcmax)
-        # else:
-        #     convert_to_df.convert_to_df_synthetic(cfg=cfg, adcmax=cfg.adcmax)
+        if isinstance(cfg.run, int):
+            convert_to_df.convert_to_df(cfg=cfg, adcmax=cfg.adcmax)
+        else:
+            convert_to_df.convert_to_df_synthetic(cfg=cfg, adcmax=cfg.adcmax)
 
         inferencer = inferencers.AnalysisTruthInferencer(cfg=cfg)
-        # compute_covariances_and_eigen.compute_covariances_and_eigen(cfg=cfg, inferencer=inferencer, column_tag="")
+        compute_covariances_and_eigen.compute_covariances_and_eigen(cfg=cfg, inferencer=inferencer, column_tag="")
+        fit_covariance_noise_model.fit_covariance_noise_model(cfg=cfg, column_tag="", n_coherent=n_coherent_noise_model)
 
         # if cfg.is_pedestal:
         #     compute_predictor_analytic.compute_predictor_analytic(cfg=cfg)
 
-        # add_correction_analytic.add_correction_analytic(cfg=cfg, inferencer=inferencer)
+        add_correction_analytic.add_correction_analytic(cfg=cfg, inferencer=inferencer)
         
-        # compute_covariances_and_eigen.compute_covariances_and_eigen(cfg=cfg, inferencer=inferencer, column_tag="_pred_analytic_k0")
-        # compute_covariances_and_eigen.compute_covariances_and_eigen(cfg=cfg, inferencer=inferencer, column_tag="_resid_analytic_k0")
+        compute_covariances_and_eigen.compute_covariances_and_eigen(cfg=cfg, inferencer=inferencer, column_tag="_pred_analytic_k0")
+        compute_covariances_and_eigen.compute_covariances_and_eigen(cfg=cfg, inferencer=inferencer, column_tag="_resid_analytic_k0")
+
+        fit_covariance_noise_model.fit_covariance_noise_model(cfg=cfg, column_tag="_resid_analytic_k0", n_coherent=n_coherent_noise_model)
+
         # compute_covariances_and_eigen.compute_covariances_and_eigen(cfg=cfg, inferencer=inferencer, column_tag="_pred_analytic_with_unconnected_k0")
         # compute_covariances_and_eigen.compute_covariances_and_eigen(cfg=cfg, inferencer=inferencer, column_tag="_resid_analytic_with_unconnected_k0")
 
@@ -102,22 +111,25 @@ def main():
             ### DNNs for ped+outer-beam
             # train_dnn.train_dnn(cfg=cfg, noprogbar=False, per_channel_cols=["channel_indices", "erx_indices"]+[f"eigvec_{i}" for i in range(20)]+[f"adc_unconnected_{i:02d}" for i in range(4)], nodes=[32, 32], dropout=0.00, tag="", batch_samples=32, epochs=1000)
         
-        # add_correction_dnn.add_correction_dnn(cfg, inferencer, nodes=[32, 32], dropout=0.0, tag="", column_tag="", per_channel_cols=["channel_indices", "erx_indices"]+[f"eigvec_{i}" for i in range(20)]+[f"adc_unconnected_{i:02d}" for i in range(4)], infer_batch=8192, plot_dir_loss=os.path.join(cfg.plotfolder_base, selection, "dnn_loss"))
+        add_correction_dnn.add_correction_dnn(cfg, inferencer, nodes=[32, 32], dropout=0.0, tag="", column_tag="", per_channel_cols=["channel_indices", "erx_indices"]+[f"eigvec_{i}" for i in range(20)]+[f"adc_unconnected_{i:02d}" for i in range(4)], infer_batch=8192, plot_dir_loss=os.path.join(cfg.plotfolder_base, selection, "dnn_loss"))
 
-        # compute_covariances_and_eigen.compute_covariances_and_eigen(cfg=cfg, inferencer=inferencer, column_tag="_pred_dnn")
-        # compute_covariances_and_eigen.compute_covariances_and_eigen(cfg=cfg, inferencer=inferencer, column_tag="_resid_dnn")
+        compute_covariances_and_eigen.compute_covariances_and_eigen(cfg=cfg, inferencer=inferencer, column_tag="_pred_dnn")
+        compute_covariances_and_eigen.compute_covariances_and_eigen(cfg=cfg, inferencer=inferencer, column_tag="_resid_dnn")
+
+        fit_covariance_noise_model.fit_covariance_noise_model(cfg=cfg, column_tag="_resid_dnn", n_coherent=n_coherent_noise_model)
+
         # add_projections_onto_noisemode.add_projections_onto_noisemode(cfg=cfg, inferencer=inferencer, column_tag="_pred_dnn", k=0)
         # add_projections_onto_noisemode.add_projections_onto_noisemode(cfg=cfg, inferencer=inferencer, column_tag="_resid_dnn", k=0)
-        
-        plot.plot_coherent_noise(cfg=cfg, inferencer=inferencer_sel, column_tag="_resid_analytic_k0", selection=selection, trunc_fracs=(1.0,))
-        plot.plot_coherent_noise(cfg=cfg, inferencer=inferencer_sel, column_tag="_resid_dnn", selection=selection, trunc_fracs=(1.0,))
+
+        # plot.plot_coherent_noise(cfg=cfg, inferencer=inferencer_sel, column_tag="_resid_analytic_k0", selection=selection, trunc_fracs=(1.0,))
+        # plot.plot_coherent_noise(cfg=cfg, inferencer=inferencer_sel, column_tag="_resid_dnn", selection=selection, trunc_fracs=(1.0,))
 
 
-        plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="", selection=selection)
-        # plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="_pred_analytic_k0", selection=selection)
-        plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="_resid_analytic_k0", selection=selection)
-        # plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="_pred_dnn", selection=selection)
-        plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="_resid_dnn", selection=selection)
+        plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="", selection=selection, n_coherent_noise_model=n_coherent_noise_model)
+        plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="_resid_analytic_k0", selection=selection, n_coherent_noise_model=n_coherent_noise_model)
+        plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="_resid_dnn", selection=selection, n_coherent_noise_model=n_coherent_noise_model)
+        # plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="_pred_analytic_k0", selection=selection, n_coherent_noise_model=n_coherent_noise_model)
+        # plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="_pred_dnn", selection=selection, n_coherent_noise_model=n_coherent_noise_model)
 
         # plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="_pred_analytic_with_unconnected_k0", selection=selection)
         # plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="_resid_analytic_with_unconnected_k0", selection=selection)

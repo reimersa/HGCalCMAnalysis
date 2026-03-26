@@ -46,7 +46,6 @@ def compute_cov_streaming(
     return acc.finalize()
 
 
-
 def f_corr_from_cov(cov) -> float:
     # Convert DataFrame to NumPy array if needed
     if isinstance(cov, pd.DataFrame):
@@ -103,41 +102,6 @@ def build_input_and_cm_df(inputs: np.ndarray, eventid: np.ndarray, ncm: int, col
 
     return (inputs_df, cm_df)
 
-def compute_cov(df_i: pd.DataFrame, df_j: pd.DataFrame) -> pd.DataFrame:
-    """Pairwise empirical covariance with NaN-aware averaging (events x channels)."""
-    # print(f"--> Computing a covariance matrix from {df_i.shape} and {df_j.shape}")
-    # # mask of valid entries (NaN = missing)
-    # mask_i = df_i.notna().astype(float)
-    # mask_j = df_j.notna().astype(float)
-    # X_i = df_i.fillna(0.0).to_numpy()
-    # X_j = df_j.fillna(0.0).to_numpy()
-    # M_i = mask_i.to_numpy()
-    # M_j = mask_j.to_numpy()
-
-    # # per-pair counts and sums
-    # N = M_i.T @ M_j                    # valid-event counts per channel pair
-    # S = X_i.T @ X_j                    # sum of products (zeros where NaN)
-
-    # # average only over valid events
-    # with np.errstate(invalid="ignore", divide="ignore"):
-    #     C = S / N
-    # C = np.nan_to_num(C, nan=0.0, posinf=0.0, neginf=0.0)
-
-    # return pd.DataFrame(C, index=df_i.columns, columns=df_j.columns)
-    print(f"--> Computing PSD covariance from {df_i.shape} and {df_j.shape}")
-
-    # Fill NaNs with 0 (safe because mean-centered)
-    X_i = df_i.fillna(0.0).to_numpy(dtype=np.float64)
-    X_j = df_j.fillna(0.0).to_numpy(dtype=np.float64)
-
-    # Single global normalization (number of events)
-    N = X_i.shape[0]
-
-    # Covariance = (X^T @ X)/N  → guaranteed PSD
-    C = (X_i.T @ X_j) / N
-    return pd.DataFrame(C, index=df_i.columns, columns=df_j.columns)
-
-
 def corr_from_cov(cov: pd.DataFrame) -> pd.DataFrame:
     """Convert covariance to correlation (safe when diagonal has zeros)."""
     d = np.diag(cov.to_numpy())
@@ -149,14 +113,6 @@ def corr_from_cov(cov: pd.DataFrame) -> pd.DataFrame:
     # numerical guard
     np.clip(R, -1.0, 1.0, out=R)
     return pd.DataFrame(R, index=cov.index, columns=cov.columns)
-
-
-def compute_cov_corr(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Convenience wrapper returning (cov, corr)."""
-    cov = compute_cov(df_i=df, df_j=df)
-    corr = corr_from_cov(cov)
-    return (cov, corr)
-
 
 
 def compute_eig_from_cov(C):

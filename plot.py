@@ -36,6 +36,12 @@ def main():
         help="Column tag to be appended at the end of 'adc_ch{i:03d}_pedsub'. E.g.: '_pred_analytic_k0' to make plots for the analytic_k0 predictions.",
     )
     parser.add_argument(
+        "--n-coherent-noise-model",
+        type=int,
+        default=1,
+        help="Number of coherent sources used in the fitted covariance noise model plots.",
+    )
+    parser.add_argument(
         "-m",
         "--modules",
         nargs="+",
@@ -78,10 +84,10 @@ def main():
 
     for cfg in cfgs:
         inferencer = inferencers.AnalysisTruthInferencer(cfg=cfg, selection=args.selection)
-        plot(cfg=cfg, inferencer=inferencer, column_tag=args.column_tag, selection=args.selection)
+        plot(cfg=cfg, inferencer=inferencer, column_tag=args.column_tag, selection=args.selection, n_coherent_noise_model=args.n_coherent_noise_model)
 
 
-def plot(cfg, inferencer, column_tag, selection) -> None:
+def plot(cfg, inferencer, column_tag, selection, n_coherent_noise_model: int = 1) -> None:
     print("Hello from plot()!")
     plot_dir = os.path.join(cfg.plotfolder_base, selection)
     os.makedirs(plot_dir, exist_ok=True)
@@ -115,11 +121,12 @@ def plot(cfg, inferencer, column_tag, selection) -> None:
             yrange = (-20., 20.)
         if cfg.run == "112044_112050_112060_112073_adcmax10":
             yrange = (-20., 20.)
-    zrange_cov = (-1., 1.) if cfg.standardize_std else (-4., 4.)
+    zrange_cov = (-1., 1.) if cfg.standardize_std else (-5., 5.)
 
     functions_plot.plot_cov_corr(cfg=cfg, column_tag=column_tag, axis_title=adc_ch_pattern, zrange_cov=zrange_cov, plot_dir=os.path.join(plot_dir, "covcorr", method_subfolder))
-    # functions_plot.plot_eigenvalues(cfg=cfg, column_tag=column_tag, out_root=os.path.join(plot_dir, "eigen", method_subfolder))
-    # functions_plot.plot_eigenvectors(cfg=cfg, column_tag=column_tag, top=4, out_root=os.path.join(plot_dir, "eigen", method_subfolder))
+    functions_plot.plot_noise_model_fit(cfg=cfg, column_tag=column_tag, zrange_cov=zrange_cov, plot_dir=os.path.join(plot_dir, "noise_model", method_subfolder), n_coherent=n_coherent_noise_model)
+    functions_plot.plot_eigenvalues(cfg=cfg, column_tag=column_tag, out_root=os.path.join(plot_dir, "eigen", method_subfolder))
+    functions_plot.plot_eigenvectors(cfg=cfg, column_tag=column_tag, top=4, out_root=os.path.join(plot_dir, "eigen", method_subfolder))
 
     functions_plot.plot_vs_chidx(cfg=cfg, varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_chidx", method_subfolder), nbins_x=cfg.nerx*cfg.nch_per_erx, nbins_y=80, y_range=yrange)
     # functions_plot.plot_2d_multicol_vs_var(varname_x="event_id", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_event_id", method_subfolder), nbins_x=200, nbins_y=80, y_range=yrange, make_profile_plot=True)
@@ -146,22 +153,22 @@ def plot(cfg, inferencer, column_tag, selection) -> None:
 
     # 1d plots with Gauss fits around 0 (only makes sense for distributions expected to peak at 0...)
     functions_plot.plot_1d_multicol(varname_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "distributions_1d", method_subfolder), x_range=yrange, nbins_x=200, do_gauss_fit=True, gauss_p0=(1E6, 0, 3))
-    functions_plot.plot_1d_multicol(varname_template=f"adc_ch005_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "distributions_1d", method_subfolder), x_range=yrange, nbins_x=200, do_gauss_fit=True, gauss_p0=(1E6, 0, 3))
-    functions_plot.plot_1d_multicol(varname_template=f"adc_ch196_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "distributions_1d", method_subfolder), x_range=yrange, nbins_x=200, do_gauss_fit=True, gauss_p0=(1E6, 0, 3))
-    functions_plot.plot_1d_multicol(varname_template=f"adc_ch195_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "distributions_1d", method_subfolder), x_range=yrange, nbins_x=200, do_gauss_fit=True, gauss_p0=(1E6, 0, 3))
-    functions_plot.plot_1d_multicol(varname_template=f"adc_ch121_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "distributions_1d", method_subfolder), x_range=yrange, nbins_x=200, do_gauss_fit=True, gauss_p0=(1E6, 0, 3))
+    # functions_plot.plot_1d_multicol(varname_template=f"adc_ch005_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "distributions_1d", method_subfolder), x_range=yrange, nbins_x=200, do_gauss_fit=True, gauss_p0=(1E6, 0, 3))
+    # functions_plot.plot_1d_multicol(varname_template=f"adc_ch196_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "distributions_1d", method_subfolder), x_range=yrange, nbins_x=200, do_gauss_fit=True, gauss_p0=(1E6, 0, 3))
+    # functions_plot.plot_1d_multicol(varname_template=f"adc_ch195_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "distributions_1d", method_subfolder), x_range=yrange, nbins_x=200, do_gauss_fit=True, gauss_p0=(1E6, 0, 3))
+    # functions_plot.plot_1d_multicol(varname_template=f"adc_ch121_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "distributions_1d", method_subfolder), x_range=yrange, nbins_x=200, do_gauss_fit=True, gauss_p0=(1E6, 0, 3))
 
     functions_plot.plot_summary_1d_multicol(varname_template=adc_ch_pattern, varname_true_template="adc_ch*_pedsub", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "summaries_1d", method_subfolder), x_range=yrange, nbins_x=200)
 
 
     # # ### 2d plots
-    functions_plot.plot_2d_multicol_vs_var(varname_x=f"nchtoa", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_ntoa", method_subfolder), nbins_y=80, y_range=yrange)
-    functions_plot.plot_2d_multicol_vs_var(varname_x=f"nchtot", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_ntot", method_subfolder), nbins_y=80, y_range=yrange)
-    functions_plot.plot_2d_multicol_vs_var(varname_x=f"adc_sum_allchannels_pedsub", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_adcsum", method_subfolder), nbins_y=80, y_range=yrange, nbins_x=80)
+    # functions_plot.plot_2d_multicol_vs_var(varname_x=f"nchtoa", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_ntoa", method_subfolder), nbins_y=80, y_range=yrange)
+    # functions_plot.plot_2d_multicol_vs_var(varname_x=f"nchtot", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_ntot", method_subfolder), nbins_y=80, y_range=yrange)
+    # functions_plot.plot_2d_multicol_vs_var(varname_x=f"adc_sum_allchannels_pedsub", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_adcsum", method_subfolder), nbins_y=80, y_range=yrange, nbins_x=80)
 
-    # # trig time plots
-    functions_plot.plot_2d_multicol_vs_var(varname_x="trig_time", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_trigtime", method_subfolder), nbins_y=80, y_range=(0., 1000.))
-    functions_plot.plot_2d_multicol_vs_var(varname_x="trig_time", varname_y_template="adc_sum_pedsub", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_trigtime", method_subfolder), nbins_y=80, y_range=(0., 10000.))
+    # # # trig time plots
+    # functions_plot.plot_2d_multicol_vs_var(varname_x="trig_time", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_trigtime", method_subfolder), nbins_y=80, y_range=(0., 1000.))
+    # functions_plot.plot_2d_multicol_vs_var(varname_x="trig_time", varname_y_template="adc_sum_pedsub", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_trigtime", method_subfolder), nbins_y=80, y_range=(0., 10000.))
 
 
 

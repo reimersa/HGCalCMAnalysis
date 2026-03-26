@@ -21,6 +21,165 @@ def plot_cov_corr(cfg: classes.AnalysisConfig, column_tag, axis_title, zrange_co
     utils.plot_covariance(df=utils.corr_from_cov(cov), nch_per_erx=cfg.nch_per_erx, title=f"Correlation ({axis_title}) - f_corr = {f_corr_pred}", xtitle="channel i", ytitle="channel j", ztitle="corr(i,j)", zrange=(-1., 1.), output_filename=os.path.join(plot_dir, f"Correlation{column_tag}.pdf"))
 
 
+def plot_noise_model_fit(cfg: classes.AnalysisConfig, column_tag, zrange_cov, plot_dir: str, n_coherent: int = 1) -> None:
+    os.makedirs(plot_dir, exist_ok=True)
+
+    fit_tag = f"{column_tag}_nc{n_coherent}"
+    summary_filename = f"noise_model_summary_mm{fit_tag}.parquet"
+    summary_path = os.path.join(cfg.noise_model_fit_folder, summary_filename)
+    if not os.path.exists(summary_path):
+        print(f"[info] Skipping noise-model plots because fit file is missing: {summary_path}")
+        return
+
+    summary = cfg.load_from_noise_model_fit_folder(summary_filename).iloc[0]
+    channels = cfg.load_from_noise_model_fit_folder(f"noise_model_channels_mm{fit_tag}.parquet")
+    loadings = cfg.load_from_noise_model_fit_folder(f"noise_model_loadings_mm{fit_tag}.parquet")
+    sigma_model = cfg.load_from_noise_model_fit_folder(f"sigma_mm_model{fit_tag}.parquet")
+    sigma_coherent = cfg.load_from_noise_model_fit_folder(f"sigma_mm_coherent{fit_tag}.parquet")
+    sigma_incoherent = cfg.load_from_noise_model_fit_folder(f"sigma_mm_incoherent{fit_tag}.parquet")
+    sigma_residual = cfg.load_from_noise_model_fit_folder(f"sigma_mm_fitresidual{fit_tag}.parquet")
+
+    title_suffix = (
+        f"{n_coherent} coherent source"
+        f"{'' if n_coherent == 1 else 's'}"
+        f" | MSE = {summary['mse']:.3g}"
+        f" | coherent fraction = {summary['coherent_fraction_trace']:.3g}"
+    )
+    filename_suffix = f"{column_tag}_nc{n_coherent}"
+
+    utils.plot_covariance(
+        df=sigma_model,
+        nch_per_erx=cfg.nch_per_erx,
+        title=f"Noise-Model Covariance ({title_suffix})",
+        xtitle="channel i",
+        ytitle="channel j",
+        ztitle="cov(i,j)",
+        zrange=zrange_cov,
+        output_filename=os.path.join(plot_dir, f"NoiseModelCovariance{filename_suffix}.pdf"),
+    )
+    utils.plot_covariance(
+        df=sigma_coherent,
+        nch_per_erx=cfg.nch_per_erx,
+        title=f"Coherent Covariance ({title_suffix})",
+        xtitle="channel i",
+        ytitle="channel j",
+        ztitle="cov(i,j)",
+        zrange=zrange_cov,
+        output_filename=os.path.join(plot_dir, f"NoiseModelCoherent{filename_suffix}.pdf"),
+    )
+    utils.plot_covariance(
+        df=sigma_incoherent,
+        nch_per_erx=cfg.nch_per_erx,
+        title=f"Incoherent Covariance ({title_suffix})",
+        xtitle="channel i",
+        ytitle="channel j",
+        ztitle="cov(i,j)",
+        zrange=zrange_cov,
+        output_filename=os.path.join(plot_dir, f"NoiseModelIncoherent{filename_suffix}.pdf"),
+    )
+    utils.plot_covariance(
+        df=sigma_residual,
+        nch_per_erx=cfg.nch_per_erx,
+        title=f"Fit-Residual Covariance ({title_suffix})",
+        xtitle="channel i",
+        ytitle="channel j",
+        ztitle="cov(i,j)",
+        zrange=zrange_cov,
+        output_filename=os.path.join(plot_dir, f"NoiseModelFitResidual{filename_suffix}.pdf"),
+    )
+
+    x = np.arange(channels.shape[0])
+    sigma_inc = np.sqrt(np.maximum(channels["incoherent_var"].to_numpy(dtype=float), 0.0))
+    sigma_coh = np.sqrt(np.maximum(channels["coherent_var"].to_numpy(dtype=float), 0.0))
+
+    fig, ax = plt.subplots(figsize=(8.2, 4.2))
+    ax.plot(x, channels["data_diag"].to_numpy(), label="data diag", lw=1.5)
+    ax.plot(x, channels["model_diag"].to_numpy(), label="model diag", lw=1.5)
+    ax.plot(x, channels["incoherent_var"].to_numpy(), label="incoherent var", lw=1.5)
+    ax.plot(x, channels["coherent_var"].to_numpy(), label="coherent var", lw=1.5)
+    for pos in range(0, cfg.nch_per_erx * (cfg.nerx + 1), cfg.nch_per_erx):
+        ax.axvline(pos, color="black", linestyle="--", linewidth=1, alpha=0.5)
+    ax.set_xlabel("channel")
+    ax.set_ylabel("variance")
+    ax.grid(ls="--", alpha=0.3)
+    ax.legend(fontsize="small", ncol=2)
+    fig.tight_layout()
+    outfilename = os.path.join(plot_dir, f"NoiseModelChannelVariances{filename_suffix}.pdf")
+    fig.savefig(outfilename)
+    print(f"--> Plotted noise-model channel variances: {outfilename}")
+    plt.close(fig)
+
+    if column_tag != "":
+        raw_fit_tag = f"_nc{n_coherent}"
+        raw_channels_filename = f"noise_model_channels_mm{raw_fit_tag}.parquet"
+        raw_channels_path = os.path.join(cfg.noise_model_fit_folder, raw_channels_filename)
+        if os.path.exists(raw_channels_path):
+            raw_channels = cfg.load_from_noise_model_fit_folder(raw_channels_filename)
+            raw_sigma_inc = np.sqrt(np.maximum(raw_channels["incoherent_var"].to_numpy(dtype=float), 0.0))
+            raw_sigma_coh = np.sqrt(np.maximum(raw_channels["coherent_var"].to_numpy(dtype=float), 0.0))
+            inc_ratio = np.nan_to_num(sigma_inc / np.maximum(raw_sigma_inc, 1e-12), nan=0.0, posinf=0.0, neginf=0.0)
+            coh_ratio = np.nan_to_num(sigma_coh / np.maximum(raw_sigma_coh, 1e-12), nan=0.0, posinf=0.0, neginf=0.0)
+            coh_over_inc_true = np.nan_to_num(raw_sigma_coh / np.maximum(raw_sigma_inc, 1e-12), nan=0.0, posinf=0.0, neginf=0.0)
+            coh_over_inc_corr = np.nan_to_num(sigma_coh / np.maximum(sigma_inc, 1e-12), nan=0.0, posinf=0.0, neginf=0.0)
+
+            fig = plt.figure(figsize=(8.2, 6.2))
+            gs  = fig.add_gridspec(3, 1, height_ratios=[3, 1, 1], hspace=0.10)
+            ax1 = fig.add_subplot(gs[0])
+            axr = fig.add_subplot(gs[1], sharex=ax1)
+            axc = fig.add_subplot(gs[2], sharex=ax1)
+
+            ax1.plot(x, raw_sigma_inc, "-",  label="incoherent (meas.)", color="tab:blue")
+            ax1.plot(x, raw_sigma_coh, "-",  label="coherent (meas.)",   color="tab:orange")
+            ax1.plot(x, sigma_inc,     "--", label="incoherent (corr.)", color="tab:blue")
+            ax1.plot(x, sigma_coh,     "--", label="coherent (corr.)",   color="tab:orange")
+
+            for ax_this in (ax1, axr, axc):
+                ax_this.tick_params(axis="both", direction="in", top=True, bottom=True, left=True, right=True, labelsize=12)
+                ax_this.grid(ls="--", alpha=0.3)
+                for pos in range(0, cfg.nch_per_erx * (cfg.nerx + 1), cfg.nch_per_erx):
+                    ax_this.axvline(pos, color="black", linestyle="--", linewidth=1, alpha=0.35)
+
+            ax1.set_ylabel("Noise (ADC)", fontsize=16, loc="top", labelpad=12)
+            ax1.set_ylim(0., ax1.get_ylim()[1] * 1.2)
+            ax1.legend(loc="upper right", fontsize=12)
+
+            axr.plot(x, inc_ratio, "--", color="tab:blue")
+            axr.plot(x, coh_ratio, "--", color="tab:orange")
+            axr.set_ylabel("corr. / meas.", fontsize=11, loc="center", labelpad=10)
+            axr.set_ylim(0., 1.1)
+
+            axc.plot(x, coh_over_inc_true, "-",  color="black")
+            axc.plot(x, coh_over_inc_corr, "--", color="black")
+            axc.set_xlabel("channel", fontsize=16, loc="right", labelpad=8)
+            axc.set_ylabel("coh. / inc.", fontsize=11, loc="center", labelpad=8)
+            axc.set_ylim(0., max(axc.get_ylim()[1], 2.))
+
+            plt.setp(ax1.get_xticklabels(), visible=False)
+            plt.setp(axr.get_xticklabels(), visible=False)
+
+            outfilename = os.path.join(plot_dir, f"NoiseModelCohIncRatio{filename_suffix}.pdf")
+            fig.savefig(outfilename, bbox_inches="tight", pad_inches=0.05)
+            print(f"--> Plotted noise-model coh/inc comparison: {outfilename}")
+            plt.close(fig)
+
+    if loadings.shape[1] > 0:
+        fig, ax = plt.subplots(figsize=(8.2, 4.2))
+        for col in loadings.columns:
+            ax.plot(x, loadings[col].to_numpy(), label=col, lw=1.5)
+        for pos in range(0, cfg.nch_per_erx * (cfg.nerx + 1), cfg.nch_per_erx):
+            ax.axvline(pos, color="black", linestyle="--", linewidth=1, alpha=0.5)
+        ax.axhline(0.0, color="black", linestyle="--", linewidth=1, alpha=0.5)
+        ax.set_xlabel("channel")
+        ax.set_ylabel("loading")
+        ax.grid(ls="--", alpha=0.3)
+        ax.legend(fontsize="small")
+        fig.tight_layout()
+        outfilename = os.path.join(plot_dir, f"NoiseModelLoadings{filename_suffix}.pdf")
+        fig.savefig(outfilename)
+        print(f"--> Plotted noise-model loadings: {outfilename}")
+        plt.close(fig)
+
+
 
 class Streaming1DHist:
     def __init__(self, x_min: float, x_max: float, nbins_x: int = None):
