@@ -56,6 +56,8 @@ def main():
             modulename=x, 
             run=args.run,
             run_for_pedestal=args.pedestal_run,
+            run_for_correction=args.run,
+            module_for_correction=x,
             standardize_std = False,
             inputfoldertag = "",
         )

@@ -60,6 +60,12 @@ def main():
         ],
         help="List of module names to compute covariances for.",
     )
+    parser.add_argument(
+        "--module-for-correction",
+        type=str,
+        required=True,
+        help="Module from which the noise-subtraction artifacts should be loaded.",
+    )
     args = parser.parse_args()
 
 
@@ -68,6 +74,8 @@ def main():
             modulename=x, 
             run=args.run,
             run_for_pedestal=args.pedestal_run,
+            run_for_correction=args.run,
+            module_for_correction=args.module_for_correction,
             standardize_std = False,
             inputfoldertag = "",
         )

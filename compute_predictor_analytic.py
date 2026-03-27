@@ -44,8 +44,10 @@ def main():
 
     cfgs = [classes.AnalysisConfig(
             modulename=x, 
-            run=-1., # not needed for this method
+            run=args.pedestal_run,
             run_for_pedestal=args.pedestal_run,
+            run_for_correction=args.pedestal_run,
+            module_for_correction=x,
             standardize_std = False,
             inputfoldertag = "",
         )

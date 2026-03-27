@@ -48,6 +48,12 @@ def main() -> None:
         help="List of module names to process (e.g. ML_F3WC_IH0182 ML_F3WC_IH0190 ...).",
     )
     parser.add_argument(
+        "--module-for-correction",
+        type=str,
+        required=True,
+        help="Module whose correction context this output folder should correspond to.",
+    )
+    parser.add_argument(
         "--standardize-std",
         action="store_true",
         help="If set, also divide pedestal-subtracted columns by their std (unit variance).",
@@ -63,6 +69,8 @@ def main() -> None:
             modulename=x, 
             run=args.run,
             run_for_pedestal=args.pedestal_run,
+            run_for_correction=args.run,
+            module_for_correction=args.module_for_correction,
             standardize_std=args.standardize_std,
             inputfoldertag="",
         ) 

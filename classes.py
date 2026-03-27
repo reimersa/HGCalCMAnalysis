@@ -73,6 +73,7 @@ class AnalysisConfig:
     run: Union[int, str]
     run_for_pedestal: Union[int, str]
     run_for_correction: List[Union[int, str]]
+    module_for_correction: str
     corrections_tag: str = ""
     runs_per_synthetic_run: dict[str, list[Union[int, str]]] = field(default_factory=dict)
     channel_ucoords_to_keep_per_run: dict[int, list[int]] = field(default_factory=dict)
@@ -106,19 +107,23 @@ class AnalysisConfig:
     def __post_init__(self):
         self.inputfoldertag = utils.get_input_tag(basetag=self.inputfoldertag, normalize_to_unit_area=False, remove_disconnected=False, standardize_std=self.standardize_std)
         self.infer_layout()
+        correction_subfolder = os.path.join(
+            f"corrections_from_Module{self.module_for_correction}",
+            f"corrections_from_Run{self.run_for_correction}",
+        )
 
         self.datafolder_base                 = "/eos/user/a/areimers/hgcal/Sep2025TB"
         self.histofiller_folder              = self.get_histofiller_folder()
-        self.analysis_inputs_folder          = os.path.join(self.datafolder_base, f"Run{self.run}/analysis_inputs{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}/corrections_from_Run{self.run_for_correction}")
+        self.analysis_inputs_folder          = os.path.join(self.datafolder_base, f"Run{self.run}/analysis_inputs{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}", correction_subfolder)
         self.pedestal_mean_std_folder        = os.path.join(self.datafolder_base, f"Run{self.run_for_pedestal}/means_stds{self.inputfoldertag}/{self.modulename}")
-        self.own_covs_folder                 = os.path.join(self.datafolder_base, f"Run{self.run}/covs{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}/corrections_from_Run{self.run_for_correction}")
+        self.own_covs_folder                 = os.path.join(self.datafolder_base, f"Run{self.run}/covs{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}", correction_subfolder)
         self.noise_model_fit_folder          = os.path.join(self.own_covs_folder, "noise_model_fits")
 
-        self.corrections_base_folder   = os.path.join(self.datafolder_base, f"corrections{self.inputfoldertag}", self.modulename, f"pedestals_from_Run{self.run_for_pedestal}", f"corrections_from_Run{self.run_for_correction}")
+        self.corrections_base_folder   = os.path.join(self.datafolder_base, f"corrections{self.inputfoldertag}", self.module_for_correction, f"pedestals_from_Run{self.run_for_pedestal}", correction_subfolder)
         self.analytic_predictor_folder = os.path.join(self.corrections_base_folder, "predictors")
         self.dnn_models_folder         = os.path.join(self.corrections_base_folder, "dnn_models")
         self.dnn_training_input_folder = os.path.join(self.corrections_base_folder, "dnn_training_inputs")
-        self.corrections_covs_folder   = os.path.join(self.datafolder_base, f"Run{self.run_for_correction}/covs{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}/corrections_from_Run{self.run_for_correction}")
+        self.corrections_covs_folder   = os.path.join(self.datafolder_base, f"Run{self.run_for_correction}/covs{self.inputfoldertag}/{self.module_for_correction}/pedestals_from_Run{self.run_for_pedestal}", correction_subfolder)
 
 
 
@@ -160,7 +165,15 @@ class AnalysisConfig:
 
         self.unconnected_channels = [erxidx*self.nch_per_erx+opt for erxidx in range(self.nerx) for opt in [8, 17, 19, 28]]
 
-        self.plotfolder_base = f"./plots/Sep2025TB/Run{self.run}/{self.modulename}{self.inputfoldertag}/pedestals_from_Run{self.run_for_pedestal}/corrections_from_Run{self.run_for_correction}"
+        self.plotfolder_base = os.path.join(
+            ".",
+            "plots",
+            "Sep2025TB",
+            f"Run{self.run}",
+            f"{self.modulename}{self.inputfoldertag}",
+            f"pedestals_from_Run{self.run_for_pedestal}",
+            correction_subfolder,
+        )
 
     def get_histofiller_folder(self):
         return os.path.join(self.datafolder_base, f"output/Run{self.run}/histofiller")

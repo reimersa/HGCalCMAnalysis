@@ -44,6 +44,12 @@ def main() -> None:
         help="List of module names to process (e.g. ML_F3WC_IH0182 ML_F3WC_IH0190 ...).",
     )
     parser.add_argument(
+        "--module-for-correction",
+        type=str,
+        required=True,
+        help="Module from which the correction artifacts should be loaded.",
+    )
+    parser.add_argument(
         "-s",
         "--selection",
         type=str,
@@ -69,6 +75,8 @@ def main() -> None:
             modulename=x, 
             run=args.run,
             run_for_pedestal=args.pedestal_run,
+            run_for_correction=args.run,
+            module_for_correction=args.module_for_correction,
             standardize_std=False,
             inputfoldertag="",
         ) 

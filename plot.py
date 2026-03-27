@@ -61,6 +61,12 @@ def main():
         help="List of module names to make plots for.",
     )
     parser.add_argument(
+        "--module-for-correction",
+        type=str,
+        required=True,
+        help="Module whose correction context should be plotted.",
+    )
+    parser.add_argument(
         "-s",
         "--selection",
         type=str,
@@ -76,6 +82,8 @@ def main():
             modulename=x, 
             run=args.run,
             run_for_pedestal=args.pedestal_run,
+            run_for_correction=args.run,
+            module_for_correction=args.module_for_correction,
             standardize_std = False,
             inputfoldertag = "",
         )

@@ -57,6 +57,8 @@ def main():
             modulename=x, 
             run=args.run,
             run_for_pedestal=args.run, # this determines where the means will be written, so must be the same as the run we're reading in
+            run_for_correction=args.run,
+            module_for_correction=x,
             standardize_std = False,
             inputfoldertag = "",
         ) 

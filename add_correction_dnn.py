@@ -45,6 +45,12 @@ def main():
             "ML_F3WC_IH0199",
         ],
     )
+    parser.add_argument(
+        "--module-for-correction",
+        type=str,
+        required=True,
+        help="Module from which the DNN correction artifacts should be loaded.",
+    )
 
     # --- DNN config / checkpoint ---
     parser.add_argument("-n", "--nodes", nargs="+", type=int, required=True, help="Nodes per hidden layer (must match training).")
@@ -90,6 +96,8 @@ def main():
             modulename=x,
             run=args.run,
             run_for_pedestal=args.pedestal_run,
+            run_for_correction=args.run,
+            module_for_correction=args.module_for_correction,
             standardize_std=False,
             inputfoldertag="",
         )

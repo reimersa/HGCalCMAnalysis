@@ -26,8 +26,9 @@ import add_correction_dnn
 def main():
 
 
-    # modulenames = ["ML_F3W_WXIH0190"]
-    modulenames = ["ML_F3WC_IH0182"]
+    # modulenames = ["ML_F3WC_IH0182"]
+    # modulenames = ["ML_F3WC_IH0194"]
+    modulenames = ["ML_F3WC_IH0191"]
 
     selection = "selection_full"
     # selection = "selection_test"
@@ -47,21 +48,20 @@ def main():
             # run="112044_112050",
             # run="112044_112050_full",
             # run = "112044_112050_112060_112073_adcmax10",
-            # run=112050, # 300 GeV
-            # run = "112050_adcmax10",
+            run=112050, # 300 GeV
+            # run = "112050_adcmax10", # 300 GeV
             # run=112051, # 300 GeV
+            # run = "112051_adcmax10", # 300 GeV
             # run=112060, # 100 GeV
             # run=112068, # 50 GeV
-            run="112068_adcmax10", # 50 GeV
+            # run="112068_adcmax10", # 50 GeV
             # run=112073, # 20 GeV
             # run="112073_outer",
             # run="112060_outer",
 
             run_for_pedestal=112044,
-            # run_for_correction="112044_112050", 
-            # run_for_correction="112050_adcmax50", 
             run_for_correction="112044_112050_112060_112073_adcmax10", 
-            # run_for_correction="112044_112050_full", 
+            module_for_correction="ML_F3WC_IH0182",
             standardize_std = False,
             inputfoldertag = "",
         ) 
@@ -70,8 +70,9 @@ def main():
 
     for cfg in cfgs:
 
-        # if cfg.is_pedestal:
-        #     calculate_means_stds.calculate_means_stds(cfg=cfg, print_vals=True)
+        if cfg.is_pedestal:
+            calculate_means_stds.calculate_means_stds(cfg=cfg, print_vals=True)
+            # raise ValueError("stop now")
         if isinstance(cfg.run, int):
             convert_to_df.convert_to_df(cfg=cfg, adcmax=cfg.adcmax)
         else:
