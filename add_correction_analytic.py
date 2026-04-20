@@ -106,6 +106,8 @@ def add_correction_analytic(cfg, inferencer) -> None:
 
         # merge preds and resids with main df
         df_chunk = pd.concat([df_chunk, preds, resids, preds_cmunc, resids_cmunc], axis=1)
+        df_chunk[f"adc_sum_pedsub_pred_analytic_k0"] = df_chunk[[x for x in preds.columns]].sum(axis=1, skipna=True)
+        df_chunk[f"adc_sum_pedsub_resid_analytic_k0"] = df_chunk[[x for x in resids.columns]].sum(axis=1, skipna=True)
 
         # overwrite file
         outfilename = os.path.join(cfg.analysis_inputs_folder, f"df_batch{idx:03d}.parquet")

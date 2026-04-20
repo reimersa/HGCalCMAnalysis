@@ -115,6 +115,12 @@ def add_vars_and_selections(cfg, inferencer) -> None:
             "split == 'train'",
         "selection_test":
             "split == 'test'",
+        "adcsumm500to500":
+            "adc_sum_pedsub > -500 and adc_sum_pedsub < 500",
+        "adcsum_residdnn_200to700":
+            "adc_sum_pedsub_resid_dnn > 200 and adc_sum_pedsub_resid_dnn < 700",
+        "adcsum_residdnn_lt200":
+            "adc_sum_pedsub_resid_dnn < 200",
     }
 
 
@@ -156,7 +162,7 @@ def add_vars_and_selections(cfg, inferencer) -> None:
                 try:
                     df_chunk[sel_col] = df_chunk.eval(expr, engine="python")
                 except Exception as e:
-                    raise RuntimeError(f"Failed to evaluate selection '{sel_col}' with expression '{expr}': {e}")
+                    print(f"[WARNING] Skipping selection '{sel_col}' because required columns are not available yet: {e}")
 
         # overwrite file
         outfilename = os.path.join(cfg.analysis_inputs_folder, f"df_batch{idx:03d}.parquet")

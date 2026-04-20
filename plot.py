@@ -137,13 +137,14 @@ def plot(cfg, inferencer, column_tag, selection, n_coherent_noise_model: int = 1
     functions_plot.plot_eigenvectors(cfg=cfg, column_tag=column_tag, top=4, out_root=os.path.join(plot_dir, "eigen", method_subfolder))
 
     functions_plot.plot_vs_chidx(cfg=cfg, varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_chidx", method_subfolder), nbins_x=cfg.nerx*cfg.nch_per_erx, nbins_y=80, y_range=yrange)
+    functions_plot.plot_module_hexmap(cfg=cfg, varname_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "module_hexmap", method_subfolder), title_suffix=f" ({method_subfolder})", cmap="coolwarm", symmetric=False)
     # functions_plot.plot_2d_multicol_vs_var(varname_x="event_id", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_event_id", method_subfolder), nbins_x=200, nbins_y=80, y_range=yrange, make_profile_plot=True)
     # functions_plot.plot_2d_multicol_vs_var(varname_x=f"adc_sum_pedsub", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_adcsum", method_subfolder), nbins_y=80, y_range=yrange, nbins_x=100)
     # functions_plot.plot_2d_multicol_vs_var(varname_x=f"adc_sum_allchannels_pedsub", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_adcsum", method_subfolder), nbins_y=80, y_range=yrange, nbins_x=100)
 
     # ## plots per eRx
-    for erx in range(cfg.nerx):
-        functions_plot.plot_2d_multicol_vs_var(varname_x=f"cm_erx{erx:02d}_pedsub", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_cm", method_subfolder), nbins_y=75, x_range=(-50, 25), y_range=yrange)
+    # for erx in range(cfg.nerx):
+    #     functions_plot.plot_2d_multicol_vs_var(varname_x=f"cm_erx{erx:02d}_pedsub", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_cm", method_subfolder), nbins_y=75, x_range=(-50, 25), y_range=yrange)
         # functions_plot.plot_2d_multicol_vs_var(varname_x=f"cm_erx{erx:02d}_pedsub", varname_y_template=f"proj_mode0_adc_chall_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_projmode0_2d_vs_cm", method_subfolder), nbins_y=80, y_range=yrange)
         # functions_plot.plot_2d_multicol_vs_var(varname_x=f"nchtoa", varname_y_template=f"cm_erx{erx:02d}_pedsub", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "cm_2d_vs_ntoa", method_subfolder), nbins_y=80, y_range=(-30, 30))
         # functions_plot.plot_2d_multicol_vs_var(varname_x=f"adc_sum_pedsub", varname_y_template=f"cm_erx{erx:02d}_pedsub", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "cm_2d_vs_adcsum", method_subfolder), nbins_y=80, y_range=(-30, 30), nbins_x=100)
@@ -156,7 +157,17 @@ def plot(cfg, inferencer, column_tag, selection, n_coherent_noise_model: int = 1
     # 1d plots
     # functions_plot.plot_1d_multicol(varname_template="nchtot", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "distributions_1d", method_subfolder), x_range=(0, 30), nbins_x=30)
     # functions_plot.plot_1d_multicol(varname_template="nchtoa", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "distributions_1d", method_subfolder), x_range=(0, 222), nbins_x=222)
-    # functions_plot.plot_1d_multicol(varname_template=f"adc_sum_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "distributions_1d", method_subfolder), x_range=(-1000, 1000), nbins_x=100)
+    functions_plot.plot_1d_multicol(varname_template=f"adc_sum_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "distributions_1d", method_subfolder), x_range=(-1000, 10000), nbins_x=200)
+    functions_plot.plot_2d_multicol_vs_var(varname_x=f"adc_sum_pedsub", varname_y_template=f"adc_sum_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "adcsum_2d_vs_adcsumcorr", method_subfolder), nbins_x=100, x_range=[-1000, 10000], nbins_y=100, y_range=[-1000, 10000])
+    functions_plot.plot_2d_multicol_vs_var(varname_x=f"adc_sum_pedsub{column_tag.replace('_pred', '_resid')}", varname_y_template=f"adc_sum_pedsub{column_tag.replace('_resid', '_pred')}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "adcsum_2d_vs_adcsumcorr", method_subfolder), nbins_x=100, x_range=[-1000, 10000], nbins_y=100, y_range=[-2000, 2000])
+    functions_plot.plot_2d_multicol_vs_var(varname_x=f"adc_sum_pedsub", varname_y_template=f"adc_sum_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "adcsum_2d_vs_adcsumcorr_zoom", method_subfolder), nbins_x=50, x_range=[-100, 1000], nbins_y=50, y_range=[-100, 1000])
+    if column_tag != "":
+        functions_plot.plot_module_hexmap(cfg=cfg, varname_template="adc_ch*_pedsub", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "module_hexmap", "true"), title_suffix=" (true)", cmap="coolwarm", symmetric=False)
+        functions_plot.plot_2d_multicol_vs_multicol(varname_x_template="adc_ch*_pedsub", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_raw_vs_corr", method_subfolder), nbins_x=200, x_range=yrange, nbins_y=200, y_range=yrange)
+        functions_plot.plot_2d_multicol_vs_multicol(varname_x_template=adc_ch_pattern, varname_y_template=adc_ch_pattern.replace("_resid", "_pred"), value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_raw_vs_corr", method_subfolder), nbins_x=200, x_range=[-100, 1000], nbins_y=200, y_range=[-50., 50.])
+        functions_plot.plot_2d_multicol_vs_var(varname_x=f"adc_sum_pedsub{column_tag.replace('_pred', '_resid')}", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_adcsum", method_subfolder), nbins_x=100, x_range=[-1000, 10000], nbins_y=200, y_range=[-50., 50.])
+
+        # functions_plot.plot_sorted_channel_contributions(varname_true_template="adc_ch*_pedsub", varname_corr_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "sorted_channel_contributions", method_subfolder), value_range=(-50., 200.), cumsum_range=(-1000., 1500.), nbins_y=160)
     # functions_plot.plot_1d_multicol(varname_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "distributions_1d", method_subfolder), x_range=yrange, nbins_x=100)
 
     # 1d plots with Gauss fits around 0 (only makes sense for distributions expected to peak at 0...)

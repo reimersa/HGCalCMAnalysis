@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt # type: ignore
 import matplotlib.gridspec as gridspec # type: ignore
 import matplotlib.colors as mcolors # type: ignore
 import matplotlib.ticker as ticker # type: ignore
+from matplotlib.patches import RegularPolygon # type: ignore
 from typing import Union, List, Iterable, Optional, Tuple
 import pandas as pd # type: ignore
 import math
@@ -477,6 +478,115 @@ def truncated_rms(x: np.ndarray, fraction: float = 1.0) -> float:
     sel = x[(x >= vmin) & (x <= vmax)]
     
     return np.sqrt(np.nanmean(sel**2)) if sel.size else np.nan
+
+
+def axial_to_cartesian(u: np.ndarray, v: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    u = np.asarray(u, dtype=float)
+    v = np.asarray(v, dtype=float)
+    # Pointy-top axial hex coordinates with unit circumradius.
+    x = np.sqrt(3.0) * (u + 0.5 * v)
+    y = 1.5 * v
+    return x, y
+
+
+def plot_module_hex_cells(
+    values: np.ndarray,
+    ucoords: np.ndarray,
+    vcoords: np.ndarray,
+    output_filename: str,
+    title: str = "",
+    zlabel: str = "",
+    annotate_values: Optional[List[str]] = None,
+    cmap: str = "coolwarm",
+    nan_color: str = "lightgray",
+    edgecolor: str = "none",
+    linewidth: float = 0.0,
+    symmetric: bool = False,
+) -> None:
+    values = np.asarray(values, dtype=float)
+    ucoords = np.asarray(ucoords, dtype=float)
+    vcoords = np.asarray(vcoords, dtype=float)
+
+    if not (values.shape == ucoords.shape == vcoords.shape):
+        raise ValueError(
+            f"Expected equal shapes for values/ucoords/vcoords, got "
+            f"{values.shape}, {ucoords.shape}, {vcoords.shape}"
+        )
+
+    valid_coords = np.isfinite(ucoords) & np.isfinite(vcoords)
+    valid_coords &= ~((ucoords == -1) & (vcoords == -1))
+    if not np.any(valid_coords):
+        valid_coords = np.isfinite(ucoords) & np.isfinite(vcoords)
+    if not np.any(valid_coords):
+        raise ValueError("No finite module coordinates found for hex-cell plot.")
+
+    x_all, y_all = axial_to_cartesian(ucoords[valid_coords], vcoords[valid_coords])
+    radius = 1.0
+
+    finite_values = values[valid_coords & np.isfinite(values)]
+    if finite_values.size == 0:
+        vmin, vmax = -1.0, 1.0
+    else:
+        vmin = float(np.nanmin(finite_values))
+        vmax = float(np.nanmax(finite_values))
+        if symmetric:
+            vmax_abs = max(abs(vmin), abs(vmax))
+            vmin, vmax = -vmax_abs, vmax_abs
+        elif np.isclose(vmin, vmax):
+            delta = 1.0 if np.isclose(vmin, 0.0) else 0.1 * abs(vmin)
+            vmin -= delta
+            vmax += delta
+
+    cmap_obj = plt.get_cmap(cmap).copy()
+    cmap_obj.set_bad(nan_color)
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+
+    fig, ax = plt.subplots(figsize=(9, 8))
+
+    for idx in np.where(valid_coords)[0]:
+        x, y = axial_to_cartesian(ucoords[idx], vcoords[idx])
+        val = values[idx]
+        facecolor = cmap_obj(norm(val)) if np.isfinite(val) else nan_color
+        patch = RegularPolygon(
+            (float(x), float(y)),
+            numVertices=6,
+            radius=radius,
+            orientation=np.radians(30.0),
+            facecolor=facecolor,
+            edgecolor=edgecolor,
+            linewidth=linewidth,
+        )
+        ax.add_patch(patch)
+
+        if annotate_values is not None:
+            ax.text(
+                float(x),
+                float(y),
+                annotate_values[idx],
+                ha="center",
+                va="center",
+                fontsize=5.5,
+                color="black",
+            )
+
+    ax.set_aspect("equal")
+    ax.set_axis_off()
+    margin = 1.2 * radius
+    ax.set_xlim(float(np.nanmin(x_all) - margin), float(np.nanmax(x_all) + margin))
+    ax.set_ylim(float(np.nanmin(y_all) - margin), float(np.nanmax(y_all) + margin))
+    if title:
+        ax.set_title(title)
+
+    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap_obj)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+    if zlabel:
+        cbar.set_label(zlabel)
+
+    plt.tight_layout()
+    plt.savefig(output_filename)
+    print(f"Saved module hex-cell plot {output_filename}")
+    plt.close(fig)
 
 def get_input_tag(basetag: str, normalize_to_unit_area: bool, remove_disconnected: bool, standardize_std: bool = False) -> str:
     result_tag = basetag

@@ -177,6 +177,8 @@ def add_correction_dnn(cfg, inferencer, nodes: list[int], dropout: float, tag: s
             df_chunk = df_chunk.drop(columns=existing)
 
         df_chunk = pd.concat([df_chunk, preds_df, resids_df], axis=1)
+        df_chunk[f"adc_sum_pedsub{column_tag}_pred_dnn"] = df_chunk[[f"{x}_pred_dnn" for x in columns_to_predict]].sum(axis=1, skipna=True)
+        df_chunk[f"adc_sum_pedsub{column_tag}_resid_dnn"] = df_chunk[[f"{x}_resid_dnn" for x in columns_to_predict]].sum(axis=1, skipna=True)
 
         outfilename = os.path.join(cfg.analysis_inputs_folder, f"df_batch{idx:03d}.parquet")
         df_chunk.to_parquet(outfilename, engine="pyarrow", index=True, compression="zstd")

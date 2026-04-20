@@ -1,4 +1,7 @@
 import os
+import json
+import subprocess
+import tempfile
 import numpy as np # type: ignore
 import matplotlib.pyplot as plt # type: ignore
 from fnmatch import fnmatch
@@ -6,6 +9,53 @@ from scipy.optimize import curve_fit
 
 import utils
 import classes
+
+
+def _coolwarm_palette_payload():
+    cmap = plt.get_cmap("coolwarm")
+    stops = np.linspace(0.0, 1.0, 255)
+    colors = cmap(stops)
+    return {
+        "stops": stops.astype(float).tolist(),
+        "red": colors[:, 0].astype(float).tolist(),
+        "green": colors[:, 1].astype(float).tolist(),
+        "blue": colors[:, 2].astype(float).tolist(),
+    }
+
+
+def _draw_wafer_hist_pdf(values, output_filename: str, module_type: str, ztitle: str, title: str, zrange=None, labels=None) -> None:
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    cmssw_src = os.path.abspath(os.path.join(repo_root, "..", ".."))
+    repo_python = os.path.join(repo_root, "python")
+    root_python = os.environ.get("ROOT_PYTHON", "/usr/bin/python3")
+    output_filename = os.path.abspath(output_filename)
+    os.makedirs(os.path.dirname(output_filename), exist_ok=True)
+    payload = {
+        "values": list(values),
+        "output_filename": output_filename,
+        "module_type": module_type,
+        "ztitle": ztitle,
+        "title": title,
+        "zrange": list(zrange) if zrange is not None else None,
+        "labels": list(labels) if labels is not None else None,
+        "palette": _coolwarm_palette_payload(),
+    }
+    env = os.environ.copy()
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    pythonpath_entries = [cmssw_src, repo_python]
+    if existing_pythonpath:
+        pythonpath_entries.append(existing_pythonpath)
+    env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
+    helper_script = os.path.join(os.path.dirname(__file__), "render_wafer_hist.py")
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", prefix="wafer_payload_", dir="/tmp", delete=False) as payload_file:
+        json.dump(payload, payload_file)
+        payload_path = payload_file.name
+    try:
+        subprocess.run([root_python, helper_script, "--payload", payload_path], cwd=repo_root, env=env, check=True)
+    finally:
+        if os.path.exists(payload_path):
+            os.unlink(payload_path)
+    print(f"Saved wafer plot {output_filename}")
 
 
 
@@ -370,6 +420,346 @@ def plot_2d_multicol_vs_var(varname_x: str, varname_y_template: str, value_itera
         label_x=varname_x, label_y=varname_y_template, label_profile="profile",
         output_filename=os.path.join(out_root, f"{varname_y_template.replace('*', 'all').replace('?', '')}_vs_{varname_x}.pdf"), 
         make_profile_plot=make_profile_plot,
+    )
+
+def plot_2d_multicol_vs_multicol(varname_x_template: str, varname_y_template: str, value_iterator, out_root: str, nbins_x: int = None, x_range=None, nbins_y: int = 80, y_range: tuple[float,float] = (-20., 20.), make_profile_plot=False):
+    os.makedirs(out_root, exist_ok=True)
+
+    cols_x = None
+    cols_y = None
+    first = True
+    var_min = None
+    var_max = None
+
+    for full_df in value_iterator():
+        matched_x = [c for c in full_df.columns if fnmatch(c, varname_x_template)]
+        matched_y = [c for c in full_df.columns if fnmatch(c, varname_y_template)]
+        if not matched_x:
+            print(f"[WARNING] No columns found that match the x template {varname_x_template}. Skipping.")
+            return
+        if not matched_y:
+            print(f"[WARNING] No columns found that match the y template {varname_y_template}. Skipping.")
+            return
+        if len(matched_x) != len(matched_y):
+            raise ValueError(
+                f"Mismatched number of columns for paired 2D plot: "
+                f"{varname_x_template} matched {len(matched_x)} columns, "
+                f"{varname_y_template} matched {len(matched_y)} columns."
+            )
+
+        if cols_x is None:
+            cols_x = matched_x
+            cols_y = matched_y
+        else:
+            if matched_x != cols_x:
+                raise ValueError(
+                    f"Matched x columns changed across chunks for template {varname_x_template}. "
+                    f"Expected {cols_x}, found {matched_x}."
+                )
+            if matched_y != cols_y:
+                raise ValueError(
+                    f"Matched y columns changed across chunks for template {varname_y_template}. "
+                    f"Expected {cols_y}, found {matched_y}."
+                )
+
+        if x_range is not None:
+            continue
+
+        vals = full_df[cols_x].to_numpy().ravel()
+        vals = vals[~np.isnan(vals)]
+        if len(vals) == 0:
+            continue
+        if first:
+            var_min = np.min(vals)
+            var_max = np.max(vals)
+            first = False
+        else:
+            var_min = min(np.min(vals), var_min)
+            var_max = max(np.max(vals), var_max)
+
+    if cols_x is None or cols_y is None:
+        print(
+            f"[WARNING] Could not resolve paired columns for templates "
+            f"{varname_x_template} and {varname_y_template}. Skipping."
+        )
+        return
+
+    if x_range is not None:
+        var_min, var_max = x_range
+    elif first:
+        print(
+            f"[WARNING] No valid x values found for paired 2D plot "
+            f"{varname_y_template} vs. {varname_x_template}. Skipping."
+        )
+        return
+
+    hist_pred = Streaming2DHist(x_min=var_min, x_max=var_max, y_min=y_range[0], y_max=y_range[1], nbins_x=nbins_x, nbins_y=nbins_y)
+    for full_df in value_iterator():
+        x = full_df[cols_x].to_numpy().ravel()
+        y = full_df[cols_y].to_numpy().ravel()
+        hist_pred.add(x, y)
+
+    x_ct_p, mean_p, rms_p = hist_pred.x_profile()
+    if np.all(np.isnan(mean_p)):
+        print(f"Means are all NaN for {varname_y_template} vs. {varname_x_template}. Skipping this combination.")
+        return
+    print(f"Maximum of {varname_y_template} vs. {varname_x_template}: {np.nanmax(mean_p)} at {x_ct_p[np.nanargmax(mean_p)]}")
+
+    utils.plot_y_vs_x_with_marginals_hist(
+        H=hist_pred.H, x_edges=hist_pred.x_edges, y_edges=hist_pred.y_edges,
+        x_prof_centers=x_ct_p, x_prof_mean=mean_p,
+        label_x=varname_x_template, label_y=varname_y_template, label_profile="profile",
+        output_filename=os.path.join(out_root, f"{varname_y_template.replace('*', 'all').replace('?', '')}_vs_{varname_x_template.replace('*', 'all').replace('?', '')}.pdf"),
+        make_profile_plot=make_profile_plot,
+    )
+
+
+def _sorted_channel_values(arr: np.ndarray, descending: bool = False) -> np.ndarray:
+    if arr.ndim != 2:
+        raise ValueError(f"Expected a 2D array, got shape {arr.shape}")
+
+    finite = np.isfinite(arr)
+    fill_value = -np.inf if descending else np.inf
+    work = np.where(finite, arr, fill_value)
+    sorted_vals = np.sort(work, axis=1)
+    if descending:
+        sorted_vals = sorted_vals[:, ::-1]
+
+    counts = finite.sum(axis=1)
+    ranks = np.arange(arr.shape[1])[None, :]
+    valid_positions = ranks < counts[:, None]
+    sorted_vals = np.where(valid_positions, sorted_vals, np.nan)
+    return sorted_vals
+
+
+def _add_sorted_values_to_hist(hist: Streaming2DHist, values: np.ndarray) -> None:
+    if values.size == 0:
+        return
+    ranks = np.broadcast_to(np.arange(values.shape[1], dtype=np.float32), values.shape)
+    mask = np.isfinite(values)
+    if not np.any(mask):
+        return
+    hist.add(ranks[mask], values[mask])
+
+
+def _accumulate_profile(sum_arr: np.ndarray, count_arr: np.ndarray, values: np.ndarray) -> None:
+    mask = np.isfinite(values)
+    sum_arr += np.nansum(values, axis=0)
+    count_arr += np.sum(mask, axis=0)
+
+
+def plot_sorted_channel_contributions(
+    varname_true_template: str,
+    varname_corr_template: str,
+    value_iterator,
+    out_root: str,
+    value_range: tuple[float, float] = (-30., 80.),
+    cumsum_range: tuple[float, float] = (-800., 1200.),
+    nbins_y: int = 120,
+) -> None:
+    os.makedirs(out_root, exist_ok=True)
+
+    cols_true = None
+    cols_corr = None
+    n_channels = None
+    for full_df in value_iterator():
+        matched_true = [c for c in full_df.columns if fnmatch(c, varname_true_template)]
+        matched_corr = [c for c in full_df.columns if fnmatch(c, varname_corr_template)]
+        if not matched_true or not matched_corr:
+            continue
+        if len(matched_true) != len(matched_corr):
+            raise ValueError(
+                f"Mismatched number of columns for sorted contributions: "
+                f"{varname_true_template} -> {len(matched_true)}, "
+                f"{varname_corr_template} -> {len(matched_corr)}"
+            )
+        cols_true = matched_true
+        cols_corr = matched_corr
+        n_channels = len(cols_true)
+        break
+
+    if cols_true is None or cols_corr is None or n_channels is None:
+        print(
+            f"[WARNING] Could not resolve columns for sorted channel contributions with "
+            f"{varname_true_template} and {varname_corr_template}. Skipping."
+        )
+        return
+
+    hist_true = Streaming2DHist(x_min=-0.5, x_max=n_channels - 0.5, y_min=value_range[0], y_max=value_range[1], nbins_x=n_channels, nbins_y=nbins_y)
+    hist_corr = Streaming2DHist(x_min=-0.5, x_max=n_channels - 0.5, y_min=value_range[0], y_max=value_range[1], nbins_x=n_channels, nbins_y=nbins_y)
+    hist_cumsum_true = Streaming2DHist(x_min=-0.5, x_max=n_channels - 0.5, y_min=cumsum_range[0], y_max=cumsum_range[1], nbins_x=n_channels, nbins_y=nbins_y)
+    hist_cumsum_corr = Streaming2DHist(x_min=-0.5, x_max=n_channels - 0.5, y_min=cumsum_range[0], y_max=cumsum_range[1], nbins_x=n_channels, nbins_y=nbins_y)
+
+    sum_sorted_true = np.zeros(n_channels, dtype=np.float64)
+    sum_sorted_corr = np.zeros(n_channels, dtype=np.float64)
+    count_sorted_true = np.zeros(n_channels, dtype=np.int64)
+    count_sorted_corr = np.zeros(n_channels, dtype=np.int64)
+    sum_cumsum_true = np.zeros(n_channels, dtype=np.float64)
+    sum_cumsum_corr = np.zeros(n_channels, dtype=np.float64)
+    count_cumsum_true = np.zeros(n_channels, dtype=np.int64)
+    count_cumsum_corr = np.zeros(n_channels, dtype=np.int64)
+
+    for full_df in value_iterator():
+        true_vals = full_df[cols_true].to_numpy(dtype=np.float32, copy=False)
+        corr_vals = full_df[cols_corr].to_numpy(dtype=np.float32, copy=False)
+
+        sorted_true = _sorted_channel_values(true_vals, descending=False)
+        sorted_corr = _sorted_channel_values(corr_vals, descending=False)
+
+        _add_sorted_values_to_hist(hist_true, sorted_true)
+        _add_sorted_values_to_hist(hist_corr, sorted_corr)
+        _accumulate_profile(sum_sorted_true, count_sorted_true, sorted_true)
+        _accumulate_profile(sum_sorted_corr, count_sorted_corr, sorted_corr)
+
+        cumsum_true = np.nancumsum(np.nan_to_num(sorted_true, nan=0.0), axis=1)
+        cumsum_corr = np.nancumsum(np.nan_to_num(sorted_corr, nan=0.0), axis=1)
+
+        _add_sorted_values_to_hist(hist_cumsum_true, cumsum_true)
+        _add_sorted_values_to_hist(hist_cumsum_corr, cumsum_corr)
+        _accumulate_profile(sum_cumsum_true, count_cumsum_true, cumsum_true)
+        _accumulate_profile(sum_cumsum_corr, count_cumsum_corr, cumsum_corr)
+
+    ranks = np.arange(n_channels, dtype=float)
+    mean_sorted_true = np.divide(sum_sorted_true, count_sorted_true, out=np.full(n_channels, np.nan), where=count_sorted_true > 0)
+    mean_sorted_corr = np.divide(sum_sorted_corr, count_sorted_corr, out=np.full(n_channels, np.nan), where=count_sorted_corr > 0)
+    mean_cumsum_true = np.divide(sum_cumsum_true, count_cumsum_true, out=np.full(n_channels, np.nan), where=count_cumsum_true > 0)
+    mean_cumsum_corr = np.divide(sum_cumsum_corr, count_cumsum_corr, out=np.full(n_channels, np.nan), where=count_cumsum_corr > 0)
+
+    utils.plot_y_vs_x_with_marginals_hist(
+        H=hist_true.H,
+        x_edges=hist_true.x_edges,
+        y_edges=hist_true.y_edges,
+        x_prof_centers=ranks,
+        x_prof_mean=mean_sorted_true,
+        label_x="sorted channel rank",
+        label_y=varname_true_template,
+        label_profile="profile",
+        output_filename=os.path.join(out_root, f"{varname_true_template.replace('*', 'all').replace('?', '')}_sorted_vs_rank.pdf"),
+    )
+    utils.plot_y_vs_x_with_marginals_hist(
+        H=hist_corr.H,
+        x_edges=hist_corr.x_edges,
+        y_edges=hist_corr.y_edges,
+        x_prof_centers=ranks,
+        x_prof_mean=mean_sorted_corr,
+        label_x="sorted channel rank",
+        label_y=varname_corr_template,
+        label_profile="profile",
+        output_filename=os.path.join(out_root, f"{varname_corr_template.replace('*', 'all').replace('?', '')}_sorted_vs_rank.pdf"),
+    )
+
+    fig, ax = plt.subplots(figsize=(8.2, 4.8))
+    ax.plot(ranks, mean_sorted_true, color="gray", label="Measured", lw=2.0)
+    ax.plot(ranks, mean_sorted_corr, color="red", label="Corrected", lw=2.0)
+    ax.axhline(0.0, color="black", linestyle="--", linewidth=1, alpha=0.5)
+    ax.set_xlabel("sorted channel rank")
+    ax.set_ylabel("channel contribution")
+    ax.grid(ls="--", alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_root, "sorted_channel_contributions_overlay.pdf"))
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(8.2, 4.8))
+    ax.plot(ranks, mean_cumsum_true, color="gray", label="Measured", lw=2.0)
+    ax.plot(ranks, mean_cumsum_corr, color="red", label="Corrected", lw=2.0)
+    ax.axhline(0.0, color="black", linestyle="--", linewidth=1, alpha=0.5)
+    ax.set_xlabel("sorted channel rank")
+    ax.set_ylabel("cumulative sum")
+    ax.grid(ls="--", alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_root, "sorted_channel_cumsum_overlay.pdf"))
+    plt.close(fig)
+
+
+def plot_module_hexmap(
+    cfg,
+    varname_template: str,
+    value_iterator,
+    out_root: str,
+    title_suffix: str = "",
+    cmap: str = "coolwarm",
+    symmetric: bool = False,
+) -> None:
+    os.makedirs(out_root, exist_ok=True)
+
+    val_cols = None
+    erx_cols = [f"erx_ch{i:03d}" for i in range(cfg.nch)]
+    erx_indices = None
+    sum_vals = None
+    count_vals = None
+
+    for full_df in value_iterator():
+        matched = [c for c in full_df.columns if fnmatch(c, varname_template)]
+        if not matched:
+            continue
+        if val_cols is None:
+            val_cols = matched
+            erx_indices = np.full(cfg.nch, np.nan, dtype=float)
+            sum_vals = np.zeros(len(val_cols), dtype=np.float64)
+            count_vals = np.zeros(len(val_cols), dtype=np.int64)
+        elif matched != val_cols:
+            raise ValueError(
+                f"Matched value columns changed across chunks for template {varname_template}. "
+                f"Expected {val_cols}, found {matched}."
+            )
+
+        erx_chunk = full_df[erx_cols].to_numpy(dtype=np.float32, copy=False)
+        for ch in range(cfg.nch):
+            if np.isfinite(erx_indices[ch]):
+                continue
+            finite_erx = np.isfinite(erx_chunk[:, ch])
+            if np.any(finite_erx):
+                first = int(np.flatnonzero(finite_erx)[0])
+                erx_indices[ch] = float(erx_chunk[first, ch])
+
+        vals = full_df[val_cols].to_numpy(dtype=np.float32, copy=False)
+        mask = np.isfinite(vals)
+        sum_vals += np.nansum(vals, axis=0)
+        count_vals += np.sum(mask, axis=0)
+
+    if val_cols is None or erx_indices is None or sum_vals is None or count_vals is None:
+        print(f"[WARNING] No columns found that match the template {varname_template}. Skipping module hexmap.")
+        return
+
+    mean_vals = np.divide(sum_vals, count_vals, out=np.full_like(sum_vals, np.nan), where=count_vals > 0)
+    sanitized = varname_template.replace("*", "all").replace("?", "")
+    module_type = cfg.modulename[:4].replace("-", "_")
+
+    _draw_wafer_hist_pdf(
+        values=np.nan_to_num(erx_indices, nan=-1.0).astype(float),
+        output_filename=os.path.join(out_root, "channel_index_map.pdf"),
+        module_type=module_type,
+        ztitle="eRx index",
+        title=f"Channel index map colored by eRx{title_suffix}",
+        zrange=(-0.5, cfg.nerx - 0.5),
+        labels=[str(i) for i in range(cfg.nch)],
+    )
+
+    finite_mean = mean_vals[np.isfinite(mean_vals)]
+    if finite_mean.size == 0:
+        zrange = (-1.0, 1.0)
+    else:
+        zmin = float(np.nanmin(finite_mean))
+        zmax = float(np.nanmax(finite_mean))
+        if symmetric:
+            vmax = max(abs(zmin), abs(zmax))
+            zrange = (-vmax, vmax)
+        elif np.isclose(zmin, zmax):
+            delta = 1.0 if np.isclose(zmin, 0.0) else 0.1 * abs(zmin)
+            zrange = (zmin - delta, zmax + delta)
+        else:
+            zrange = (zmin, zmax)
+
+    _draw_wafer_hist_pdf(
+        values=np.nan_to_num(mean_vals, nan=0.0).astype(float),
+        output_filename=os.path.join(out_root, f"{sanitized}_mean_hexmap.pdf"),
+        module_type=module_type,
+        ztitle=f"mean {sanitized}",
+        title=f"Mean {sanitized}{title_suffix}",
+        zrange=zrange,
+        labels=None,
     )
 
 def plot_1d_multicol(varname_template: str, value_iterator, out_root: str, nbins_x: int = None, x_range=None, do_gauss_fit=False, gauss_p0=None):
