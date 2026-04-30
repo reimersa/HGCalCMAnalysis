@@ -62,6 +62,13 @@ def main():
         required=True,
         help="Module whose correction context this covariance output should correspond to.",
     )
+    parser.add_argument(
+        "-s",
+        "--selection",
+        type=str,
+        default="",
+        help="Only use events for which the given selection column is true when deriving these covariances.",
+    )
     args = parser.parse_args()
 
 
@@ -72,6 +79,8 @@ def main():
             run_for_pedestal=args.pedestal_run,
             run_for_correction=args.run,
             module_for_correction=args.module_for_correction,
+            derive_correction=True,
+            selection_for_correction=args.selection,
             standardize_std = False,
             inputfoldertag = "",
         )
@@ -79,7 +88,7 @@ def main():
     ]
 
     for cfg in cfgs:
-        inferencer = inferencers.AnalysisTruthInferencer(cfg=cfg)
+        inferencer = inferencers.AnalysisTruthInferencer(cfg=cfg, selection=args.selection)
         compute_covariances_and_eigen(
             cfg=cfg,
             inferencer=inferencer,
@@ -114,21 +123,28 @@ def compute_covariances_and_eigen(cfg, inferencer, column_tag) -> None:
     vals_mcmc, vecs_mcmc = utils.compute_eig_from_cov(C=sigma_mcmc_df)
     vals_mcmc_df = pd.DataFrame({"eigval": vals_mcmc})
     vecs_mcmc_df = pd.DataFrame(vecs_mcmc, index=sigma_mcmc_df.index, columns=[f"eigvec_{i}" for i in range(vecs_mcmc.shape[1])])
-    
+
+    def write_df(df: pd.DataFrame, filename: str, index: bool = True) -> None:
+        utils.write_via_tmpdir(
+            outfilename=os.path.join(cfg.own_covs_folder, filename),
+            suffix=".parquet",
+            writer_fn=lambda tmp, data=df, use_index=index: data.to_parquet(tmp, index=use_index, compression="zstd"),
+        )
+
     os.makedirs(cfg.own_covs_folder, exist_ok=True)
-    sigma_cc_df.to_parquet(os.path.join(cfg.own_covs_folder, "sigma_cc.parquet"), index=True, compression="zstd")
-    sigma_mc_df.to_parquet(os.path.join(cfg.own_covs_folder, f"sigma_mc{artifact_tag}.parquet"), index=True, compression="zstd")
-    sigma_mm_df.to_parquet(os.path.join(cfg.own_covs_folder, f"sigma_mm{artifact_tag}.parquet"), index=True, compression="zstd")
-    sigma_mcmc_df.to_parquet(os.path.join(cfg.own_covs_folder, f"sigma_mcmc{artifact_tag}.parquet"), index=True, compression="zstd")
-    sigma_cucu_df.to_parquet(os.path.join(cfg.own_covs_folder, f"sigma_cucu{artifact_tag}.parquet"), index=True, compression="zstd")
-    sigma_mnou_cu_df.to_parquet(os.path.join(cfg.own_covs_folder, f"sigma_mnou_cu{artifact_tag}.parquet"), index=True, compression="zstd")
+    write_df(sigma_cc_df, "sigma_cc.parquet")
+    write_df(sigma_mc_df, f"sigma_mc{artifact_tag}.parquet")
+    write_df(sigma_mm_df, f"sigma_mm{artifact_tag}.parquet")
+    write_df(sigma_mcmc_df, f"sigma_mcmc{artifact_tag}.parquet")
+    write_df(sigma_cucu_df, f"sigma_cucu{artifact_tag}.parquet")
+    write_df(sigma_mnou_cu_df, f"sigma_mnou_cu{artifact_tag}.parquet")
     print(f"Wrote covariances to folder: {cfg.own_covs_folder}")
 
-    vals_mm_df.to_parquet(os.path.join(cfg.own_covs_folder, f"eigenvalues_mm{artifact_tag}.parquet"), index=True, compression="zstd")
-    vecs_mm_df.to_parquet(os.path.join(cfg.own_covs_folder, f"eigenvectors_mm{artifact_tag}.parquet"), index=True, compression="zstd")
+    write_df(vals_mm_df, f"eigenvalues_mm{artifact_tag}.parquet")
+    write_df(vecs_mm_df, f"eigenvectors_mm{artifact_tag}.parquet")
 
-    vals_mcmc_df.to_parquet(os.path.join(cfg.own_covs_folder, f"eigenvalues_mcmc{artifact_tag}.parquet"), index=True, compression="zstd")
-    vecs_mcmc_df.to_parquet(os.path.join(cfg.own_covs_folder, f"eigenvectors_mcmc{artifact_tag}.parquet"), index=True, compression="zstd")
+    write_df(vals_mcmc_df, f"eigenvalues_mcmc{artifact_tag}.parquet")
+    write_df(vecs_mcmc_df, f"eigenvectors_mcmc{artifact_tag}.parquet")
     print(f"Wrote eigenvalues and -vectors to the same folder: {cfg.own_covs_folder}")
 
 

@@ -4,8 +4,12 @@ import subprocess
 import tempfile
 import numpy as np # type: ignore
 import matplotlib.pyplot as plt # type: ignore
+import matplotlib as mpl
+from matplotlib.lines import Line2D # type: ignore
 from fnmatch import fnmatch
 from scipy.optimize import curve_fit
+from typing import Optional, Tuple
+import mplhep as mh
 
 import utils
 import classes
@@ -56,6 +60,19 @@ def _draw_wafer_hist_pdf(values, output_filename: str, module_type: str, ztitle:
         if os.path.exists(payload_path):
             os.unlink(payload_path)
     print(f"Saved wafer plot {output_filename}")
+
+
+def _group_mean_and_sem(grouped_values) -> tuple[np.ndarray, np.ndarray]:
+    means = np.asarray([np.mean(values) for values in grouped_values], dtype=float)
+    stds = np.asarray([np.std(values) for values in grouped_values], dtype=float)
+    counts = np.asarray([values.size for values in grouped_values], dtype=float)
+    sems = np.divide(
+        stds,
+        np.sqrt(counts),
+        out=np.full_like(stds, np.nan),
+        where=counts > 0,
+    )
+    return means, sems
 
 
 
@@ -211,6 +228,8 @@ def plot_noise_model_fit(cfg: classes.AnalysisConfig, column_tag, zrange_cov, pl
             fig.savefig(outfilename, bbox_inches="tight", pad_inches=0.05)
             print(f"--> Plotted noise-model coh/inc comparison: {outfilename}")
             plt.close(fig)
+        else:
+            print(f" WILL NOT PLOT Coherent/Incoherent ratio from noise model because '{raw_channels_path}' does not exist.")
 
     if loadings.shape[1] > 0:
         fig, ax = plt.subplots(figsize=(8.2, 4.2))
@@ -509,9 +528,143 @@ def plot_2d_multicol_vs_multicol(varname_x_template: str, varname_y_template: st
         H=hist_pred.H, x_edges=hist_pred.x_edges, y_edges=hist_pred.y_edges,
         x_prof_centers=x_ct_p, x_prof_mean=mean_p,
         label_x=varname_x_template, label_y=varname_y_template, label_profile="profile",
-        output_filename=os.path.join(out_root, f"{varname_y_template.replace('*', 'all').replace('?', '')}_vs_{varname_x_template.replace('*', 'all').replace('?', '')}.pdf"),
+        output_filename=os.path.join(out_root, f"{varname_y_template.replace('*', 'all').replace('?', '')}_vs_{varname_x_template.replace('*', 'all').replace('?', '')}.pdf"), 
         make_profile_plot=make_profile_plot,
     )
+
+
+def plot_adc_profile_vs_cm_overlay(
+    cfg: classes.AnalysisConfig,
+    value_iterator,
+    column_tags: list[str],
+    erx: int,
+    out_root: str,
+    nbins_x: int = None,
+    x_range: Optional[Tuple[float, float]] = None,
+    nbins_y: int = 75,
+    y_range: Tuple[float, float] = (-20.0, 20.0),
+    profile_y_range: Optional[Tuple[float, float]] = None,
+) -> None:
+    os.makedirs(out_root, exist_ok=True)
+
+    mh.style.use('CMS')
+
+    tags_to_plot = [""]
+    for tag in column_tags:
+        if tag not in tags_to_plot:
+            tags_to_plot.append(tag)
+
+    varname_x = f"cm_erx{erx:02d}_pedsub"
+    if x_range is None:
+        first = True
+        for full_df in value_iterator():
+            vals = full_df[varname_x]
+            if len(vals) == 0:
+                continue
+            if first:
+                var_min = min(vals)
+                var_max = max(vals)
+                first = False
+            else:
+                var_min = min(min(vals), var_min)
+                var_max = max(max(vals), var_max)
+        if first:
+            print(f"[info] Skipping ADC-profile-vs-CM overlay for eRx {erx}: no x values found.")
+            return
+    else:
+        var_min, var_max = x_range
+
+    colors = ["black", "tab:blue", "tab:red", "tab:green", "tab:orange", "tab:purple"]
+    prepared_profiles = []
+
+    for idx, column_tag in enumerate(tags_to_plot):
+        varname_y_template = f"adc_ch*_pedsub{column_tag}"
+        hist = Streaming2DHist(
+            x_min=var_min,
+            x_max=var_max,
+            y_min=y_range[0],
+            y_max=y_range[1],
+            nbins_x=nbins_x,
+            nbins_y=nbins_y,
+        )
+
+        found_cols = False
+        for full_df in value_iterator():
+            cols_y = [c for c in full_df.columns if fnmatch(c, varname_y_template)]
+            if not cols_y:
+                continue
+
+            found_cols = True
+            x = full_df[varname_x].to_numpy(dtype=np.float64, copy=False)
+            y = full_df[cols_y].to_numpy(dtype=np.float64, copy=False)
+            x_rep = np.repeat(x, len(cols_y))
+            y_flat = y.ravel()
+            hist.add(x_rep, y_flat)
+
+        if not found_cols:
+            print(f"[info] Skipping ADC-profile-vs-CM overlay for {column_tag or 'uncorrected'}: no matching columns.")
+            continue
+
+        x_centers, mean_profile, rms_profile = hist.x_profile()
+        count_profile = hist.x_count.astype(np.float64, copy=False)
+        sem_profile = np.divide(
+            rms_profile,
+            np.sqrt(count_profile),
+            out=np.full_like(rms_profile, np.nan),
+            where=count_profile > 0,
+        )
+        valid = np.isfinite(mean_profile) & np.isfinite(sem_profile)
+        if not np.any(valid):
+            print(f"[info] Skipping ADC-profile-vs-CM overlay for {column_tag or 'uncorrected'}: all profile bins are NaN.")
+            continue
+
+        prepared_profiles.append(
+            {
+                "x": x_centers[valid],
+                "y": mean_profile[valid],
+                "yerr": sem_profile[valid],
+                "color": colors[idx % len(colors)],
+                "label": _column_tag_label(column_tag),
+            }
+        )
+
+    if not prepared_profiles:
+        print(f"[info] Skipping ADC-profile-vs-CM overlay for eRx {erx}: no valid method profiles.")
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    for profile in prepared_profiles:
+        ax.errorbar(
+            profile["x"],
+            profile["y"],
+            yerr=profile["yerr"],
+            fmt="o",
+            color=profile["color"],
+            linewidth=1.6,
+            markersize=5,
+            capsize=4,
+            label=profile["label"],
+        )
+
+    ax.set_xlabel(f"Mean-subtracted CM measurement (ADC units)", fontsize=20, loc="right", labelpad=8)
+    ax.set_ylabel("Mean residual pedestal (ADC units)", fontsize=20, loc="top", labelpad=10)
+    ax.tick_params(axis="both", which="both", labelsize=16)
+    ax.axhline(0.0, color="0.5", linestyle="--", linewidth=1.2, alpha=0.9)
+
+    if x_range is not None:
+        ax.set_xlim(*x_range)
+    if profile_y_range is not None:
+        ax.set_ylim(*profile_y_range)
+
+    mh.cms.label(llabel='Preliminary', rlabel='', ax=ax, data=True, loc=2, fontsize=22)
+
+    ax.legend(frameon=False, fontsize=15, loc="upper right")
+    fig.subplots_adjust(left=0.12, right=0.98, bottom=0.14, top=0.98)
+
+    output_path = os.path.join(out_root, f"adc_profile_vs_{varname_x}_overlay.pdf")
+    fig.savefig(output_path)
+    print(f"--> Plotted ADC-profile-vs-CM overlay: {output_path}")
+    plt.close(fig)
 
 
 def _sorted_channel_values(arr: np.ndarray, descending: bool = False) -> np.ndarray:
@@ -656,7 +809,7 @@ def plot_sorted_channel_contributions(
     ax.set_ylabel("channel contribution")
     ax.grid(ls="--", alpha=0.3)
     ax.legend()
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.16, right=0.98, bottom=0.14, top=0.98)
     fig.savefig(os.path.join(out_root, "sorted_channel_contributions_overlay.pdf"))
     plt.close(fig)
 
@@ -689,6 +842,9 @@ def plot_module_hexmap(
     erx_indices = None
     sum_vals = None
     count_vals = None
+    window_sum_vals = None
+    window_sum_vals2 = None
+    window_count_vals = None
 
     for full_df in value_iterator():
         matched = [c for c in full_df.columns if fnmatch(c, varname_template)]
@@ -699,6 +855,9 @@ def plot_module_hexmap(
             erx_indices = np.full(cfg.nch, np.nan, dtype=float)
             sum_vals = np.zeros(len(val_cols), dtype=np.float64)
             count_vals = np.zeros(len(val_cols), dtype=np.int64)
+            window_sum_vals = np.zeros(len(val_cols), dtype=np.float64)
+            window_sum_vals2 = np.zeros(len(val_cols), dtype=np.float64)
+            window_count_vals = np.zeros(len(val_cols), dtype=np.int64)
         elif matched != val_cols:
             raise ValueError(
                 f"Matched value columns changed across chunks for template {varname_template}. "
@@ -719,11 +878,38 @@ def plot_module_hexmap(
         sum_vals += np.nansum(vals, axis=0)
         count_vals += np.sum(mask, axis=0)
 
-    if val_cols is None or erx_indices is None or sum_vals is None or count_vals is None:
+        window_mask = mask & (vals >= -10.0) & (vals <= 10.0)
+        window_vals = np.where(window_mask, vals, 0.0)
+        window_sum_vals += np.sum(window_vals, axis=0)
+        window_sum_vals2 += np.sum(window_vals * window_vals, axis=0)
+        window_count_vals += np.sum(window_mask, axis=0)
+
+    if (
+        val_cols is None
+        or erx_indices is None
+        or sum_vals is None
+        or count_vals is None
+        or window_sum_vals is None
+        or window_sum_vals2 is None
+        or window_count_vals is None
+    ):
         print(f"[WARNING] No columns found that match the template {varname_template}. Skipping module hexmap.")
         return
 
     mean_vals = np.divide(sum_vals, count_vals, out=np.full_like(sum_vals, np.nan), where=count_vals > 0)
+    mean_window_vals = np.divide(
+        window_sum_vals,
+        window_count_vals,
+        out=np.full_like(window_sum_vals, np.nan),
+        where=window_count_vals > 0,
+    )
+    rms_window_vals = np.divide(
+        window_sum_vals2,
+        window_count_vals,
+        out=np.full_like(window_sum_vals2, np.nan),
+        where=window_count_vals > 0,
+    ) - mean_window_vals * mean_window_vals
+    rms_window_vals = np.sqrt(np.maximum(rms_window_vals, 0.0))
     sanitized = varname_template.replace("*", "all").replace("?", "")
     module_type = cfg.modulename[:4].replace("-", "_")
 
@@ -737,20 +923,23 @@ def plot_module_hexmap(
         labels=[str(i) for i in range(cfg.nch)],
     )
 
-    finite_mean = mean_vals[np.isfinite(mean_vals)]
-    if finite_mean.size == 0:
-        zrange = (-1.0, 1.0)
-    else:
-        zmin = float(np.nanmin(finite_mean))
-        zmax = float(np.nanmax(finite_mean))
-        if symmetric:
+    def _zrange(values: np.ndarray, symmetric_local: bool = False) -> Tuple[float, float]:
+        finite_vals = values[np.isfinite(values)]
+        if finite_vals.size == 0:
+            return (-1.0, 1.0)
+        zmin = float(np.nanmin(finite_vals))
+        zmax = float(np.nanmax(finite_vals))
+        if symmetric_local:
             vmax = max(abs(zmin), abs(zmax))
-            zrange = (-vmax, vmax)
-        elif np.isclose(zmin, zmax):
+            return (-vmax, vmax)
+        if np.isclose(zmin, zmax):
             delta = 1.0 if np.isclose(zmin, 0.0) else 0.1 * abs(zmin)
-            zrange = (zmin - delta, zmax + delta)
-        else:
-            zrange = (zmin, zmax)
+            return (zmin - delta, zmax + delta)
+        return (zmin, zmax)
+
+    mean_zrange = _zrange(mean_vals, symmetric_local=symmetric)
+    mean_window_zrange = _zrange(mean_window_vals, symmetric_local=symmetric)
+    rms_window_zrange = _zrange(rms_window_vals, symmetric_local=False)
 
     _draw_wafer_hist_pdf(
         values=np.nan_to_num(mean_vals, nan=0.0).astype(float),
@@ -758,7 +947,27 @@ def plot_module_hexmap(
         module_type=module_type,
         ztitle=f"mean {sanitized}",
         title=f"Mean {sanitized}{title_suffix}",
-        zrange=zrange,
+        zrange=mean_zrange,
+        labels=None,
+    )
+
+    _draw_wafer_hist_pdf(
+        values=np.nan_to_num(mean_window_vals, nan=0.0).astype(float),
+        output_filename=os.path.join(out_root, f"{sanitized}_mean_window_hexmap.pdf"),
+        module_type=module_type,
+        ztitle=f"mean [-10, 10] {sanitized}",
+        title=f"Mean [-10, 10] {sanitized}{title_suffix}",
+        zrange=(-2.5, 2.5),
+        labels=None,
+    )
+
+    _draw_wafer_hist_pdf(
+        values=np.nan_to_num(rms_window_vals, nan=0.0).astype(float),
+        output_filename=os.path.join(out_root, f"{sanitized}_rms_window_hexmap.pdf"),
+        module_type=module_type,
+        ztitle=f"RMS [-10, 10] {sanitized}",
+        title=f"RMS [-10, 10] {sanitized}{title_suffix}",
+        zrange=(0., 5.),
         labels=None,
     )
 
@@ -775,6 +984,554 @@ def plot_1d_multicol(varname_template: str, value_iterator, out_root: str, nbins
         outpath = outpath.replace("_1d.pdf", "_gaussfit_1d.pdf")
     utils.plot_hist_single_precomputed(x=hist.H, mean=hist.x_mean_rms()[0], rms=hist.x_mean_rms()[1], mean_window=hist.x_mean_rms_window()[0], rms_window=hist.x_mean_rms_window()[1], bins=hist.x_edges, xlabel=f"{varname_template}", ylabel="Number of events", title="", color="gray", outpath=outpath, show_mean_line=True, do_gauss_fit=do_gauss_fit, gauss_p0=gauss_p0)
 
+
+
+def _load_cell_areas(cfg: classes.AnalysisConfig) -> np.ndarray:
+    module_type = cfg.modulename[:4].replace("-", "_")
+    cellareas_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "data", "cellareas.json")
+    )
+
+    with open(cellareas_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+
+    if module_type not in payload:
+        raise KeyError(
+            f"Module type '{module_type}' not found in cell area file {cellareas_path}."
+        )
+
+    areas = np.asarray(payload[module_type]["Area"], dtype=float)
+    sfs   = np.asarray(payload[module_type]["SF"], dtype=float)
+    if areas.shape[0] != cfg.nch:
+        raise ValueError(
+            f"Cell area count mismatch for module type '{module_type}': "
+            f"expected {cfg.nch}, found {areas.shape[0]}."
+        )
+
+    return areas, sfs
+
+
+def _full_cell_area_mm2(cell_areas: np.ndarray, cell_area_fractions: np.ndarray) -> Optional[float]:
+    mask = np.isfinite(cell_areas) & np.isfinite(cell_area_fractions) & np.isclose(cell_area_fractions, 1.0)
+    if not np.any(mask):
+        return None
+    return float(cell_areas[mask][0])
+
+
+def _add_full_cell_area_tag(ax, full_cell_area_mm2: Optional[float], y_pos: float = 0.75, fontsize: int = 14) -> None:
+    if full_cell_area_mm2 is None:
+        return
+
+    ax.text(
+        0.05,
+        y_pos,
+        f"Full cell area: {full_cell_area_mm2:.2f} mm$^2$",
+        transform=ax.transAxes,
+        fontsize=fontsize,
+        color="0.0",
+        ha="left",
+        va="top",
+    )
+
+
+def _compute_channel_mean_and_rms(
+    varname_template: str,
+    value_iterator,
+    window: Optional[Tuple[float, float]] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    cols = None
+    counts = None
+    sums = None
+    sums2 = None
+
+    for full_df in value_iterator():
+        matched = [c for c in full_df.columns if fnmatch(c, varname_template)]
+        if not matched:
+            continue
+
+        if cols is None:
+            cols = matched
+            counts = np.zeros(len(cols), dtype=np.int64)
+            sums = np.zeros(len(cols), dtype=np.float64)
+            sums2 = np.zeros(len(cols), dtype=np.float64)
+        elif matched != cols:
+            raise ValueError(
+                f"Matched columns changed across chunks for template {varname_template}. "
+                f"Expected {cols}, found {matched}."
+            )
+
+        values = full_df[cols].to_numpy(dtype=np.float64, copy=False)
+        mask = np.isfinite(values)
+        if window is not None:
+            mask &= (values >= window[0]) & (values <= window[1])
+        counts += np.sum(mask, axis=0)
+        sums += np.where(mask, values, 0.0).sum(axis=0)
+        sums2 += np.where(mask, values * values, 0.0).sum(axis=0)
+
+    if cols is None or counts is None or sums is None or sums2 is None:
+        raise ValueError(f"No columns found for template {varname_template}.")
+
+    means = np.divide(sums, counts, out=np.full_like(sums, np.nan), where=counts > 0)
+    variances = np.divide(sums2, counts, out=np.full_like(sums2, np.nan), where=counts > 0) - means * means
+    variances = np.maximum(variances, 0.0)
+    return means, np.sqrt(variances), counts
+
+
+def _column_tag_label(column_tag: str) -> str:
+    if column_tag == "":
+        return "No correction for CM"
+    if column_tag == "_resid_analytic_k0":
+        return "Analytic correction for CM"
+    if column_tag == "_resid_dnn":
+        return "DNN correction for CM"
+    return column_tag.strip("_")
+
+
+def _quadratic(x, a, b, c):
+    return a * x * x + b * x + c
+
+
+def _violin_width(x_values: np.ndarray) -> float:
+    unique_x = np.unique(np.sort(x_values[np.isfinite(x_values)]))
+    if unique_x.size >= 2:
+        base_spacing = float(np.min(np.diff(unique_x)))
+    else:
+        base_spacing = 0.2
+
+    return 5. * base_spacing
+
+
+def _add_violin_groups(
+    ax,
+    x_positions: np.ndarray,
+    grouped_values: list[np.ndarray],
+    color: str,
+    widths: np.ndarray,
+) -> None:
+    valid_groups = [
+        (x_pos, values, width)
+        for x_pos, values, width in zip(x_positions, grouped_values, widths)
+        if values.size > 0
+    ]
+    if not valid_groups:
+        return
+
+    violin = ax.violinplot(
+        dataset=[values for _, values, _ in valid_groups],
+        positions=[x_pos for x_pos, _, _ in valid_groups],
+        widths=[width for _, _, width in valid_groups],
+        bw_method=0.1,
+        showmeans=False,
+        showmedians=False,
+        showextrema=False,
+        points=100,
+    )
+
+    for body in violin["bodies"]:
+        body.set_facecolor(color)
+        body.set_edgecolor(color)
+        body.set_alpha(0.18)
+        body.set_linewidth(1.8)
+
+
+def _add_quadratic_fit(
+    ax,
+    x: np.ndarray,
+    y: np.ndarray,
+    color: str,
+    label: str,
+) -> None:
+    mask = np.isfinite(x) & np.isfinite(y)
+    x_fit = x[mask]
+    y_fit = y[mask]
+
+    if x_fit.size < 3 or np.unique(x_fit).size < 3:
+        print(f"[info] Skipping quadratic fit for {label}: need at least 3 distinct x points.")
+        return
+
+    try:
+        popt, _ = curve_fit(_quadratic, x_fit, y_fit, p0=(1.0, 1.0, 0.0), maxfev=20000)
+    except (RuntimeError, ValueError) as exc:
+        print(f"[info] Skipping quadratic fit for {label}: {exc}")
+        return
+
+    x_dense = np.linspace(np.min(x_fit), np.max(x_fit), 200)
+    y_dense = _quadratic(x_dense, *popt)
+
+    ax.plot(
+        x_dense,
+        y_dense,
+        "--",
+        color=color,
+        linewidth=1.6,
+        alpha=0.9,
+    )
+    print(
+        f"--> Quadratic fit for {label}: "
+        f"y = {popt[0]:.6g} x^2 + {popt[1]:.6g} x + {popt[2]:.6g}"
+    )
+
+
+def _plot_noise_vs_cell_area_rms(
+    cfg: classes.AnalysisConfig,
+    value_iterator,
+    column_tags: list[str],
+    out_root: str,
+    window: Optional[Tuple[float, float]],
+    ylabel: str,
+    outfilename: str,
+    x_range: Optional[Tuple[float, float]] = None,
+    y_range: Optional[Tuple[float, float]] = None,
+) -> None:
+
+    os.makedirs(out_root, exist_ok=True)
+    
+    mh.style.use('CMS')
+
+
+    tags_to_plot = [""]
+    for tag in column_tags:
+        if tag not in tags_to_plot:
+            tags_to_plot.append(tag)
+
+    cell_areas, cell_area_fractions = _load_cell_areas(cfg)
+    full_cell_area_mm2 = _full_cell_area_mm2(cell_areas, cell_area_fractions)
+    colors = ["black", "tab:blue", "tab:red", "tab:green", "tab:orange", "tab:purple"]
+    violin_width = _violin_width(cell_area_fractions[cell_area_fractions > 0.0])
+
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    prepared_curves = []
+    max_group_count = 0
+
+    for idx, column_tag in enumerate(tags_to_plot):
+        varname_template = f"adc_ch*_pedsub{column_tag}"
+        try:
+            _, channel_rms, channel_counts = _compute_channel_mean_and_rms(
+                varname_template=varname_template,
+                value_iterator=value_iterator,
+                window=window,
+            )
+        except ValueError as exc:
+            print(f"[info] Skipping noise-vs-cell-area curve for {column_tag or 'uncorrected'}: {exc}")
+            continue
+
+        valid = np.isfinite(cell_areas) & (cell_areas > 0.0) & np.isfinite(channel_rms) & (channel_counts > 0)
+        if not np.any(valid):
+            print(f"[info] No valid channels available for noise-vs-cell-area curve: {column_tag or 'uncorrected'}")
+            continue
+
+        area_fractions_valid = cell_area_fractions[valid]
+        noise_valid = channel_rms[valid]
+        unique_area_fractions = np.unique(area_fractions_valid)
+        grouped_noise_area_fractions = [
+            noise_valid[area_fractions_valid == area_fraction]
+            for area_fraction in unique_area_fractions
+        ]
+        group_counts = np.asarray([values.size for values in grouped_noise_area_fractions], dtype=float)
+        if group_counts.size > 0:
+            max_group_count = max(max_group_count, int(np.max(group_counts)))
+
+        prepared_curves.append(
+            {
+                "x": unique_area_fractions,
+                "grouped_values": grouped_noise_area_fractions,
+                "group_counts": group_counts,
+                "raw_x": area_fractions_valid,
+                "raw_y": noise_valid,
+                "color": colors[idx % len(colors)],
+                "label": _column_tag_label(column_tag),
+            }
+        )
+
+    if not prepared_curves:
+        plt.close(fig)
+        print("[info] Skipping noise-vs-cell-area plot because no methods had valid inputs.")
+        return
+
+    width_norm = float(max_group_count) if max_group_count > 0 else 1.0
+
+    for curve in prepared_curves:
+        mean_noise_area_fractions, sem_noise_area_fractions = _group_mean_and_sem(curve["grouped_values"])
+        scaled_widths = violin_width * np.sqrt(curve["group_counts"] / width_norm)
+
+        # _add_violin_groups(
+        #     ax=ax,
+        #     x_positions=curve["x"],
+        #     grouped_values=curve["grouped_values"],
+        #     color=curve["color"],
+        #     widths=scaled_widths,
+        # )
+
+        ax.errorbar(
+            curve["x"],
+            mean_noise_area_fractions,
+            yerr=sem_noise_area_fractions,
+            fmt="o",
+            color=curve["color"],
+            linewidth=1.6,
+            markersize=5,
+            capsize=4,
+            label=curve["label"],
+        )
+        _add_quadratic_fit(
+            ax=ax,
+            x=curve["raw_x"],
+            y=curve["raw_y"],
+            color=curve["color"],
+            label=curve["label"],
+        )
+
+    ax.set_xlabel("Cell area / full cell area", fontsize=20, loc="right", labelpad=8)
+    ax.set_ylabel(ylabel, fontsize=20, loc="top", labelpad=10)
+    ax.tick_params(axis="both", which="both", labelsize=16)
+
+    if x_range is not None:
+        ax.set_xlim(*x_range)
+    if y_range is not None:
+        ax.set_ylim(*y_range)
+    # ax.tick_params(
+    #     axis="both",
+    #     which="both",
+    #     direction="in",
+    #     top=True,
+    #     right=True,
+    #     labelsize=13,
+    #     length=6,
+    # )
+
+    # mh.cms.label("Preliminary", data=True, ax=ax, loc=2)
+    mh.cms.label(llabel='Preliminary', rlabel='', ax=ax, data=True, loc=2, fontsize=22)
+    _add_full_cell_area_tag(ax, full_cell_area_mm2=full_cell_area_mm2, fontsize=15)
+
+    legend_handles, legend_labels = ax.get_legend_handles_labels()
+    legend_handles.append(
+        Line2D(
+            [0],
+            [0],
+            linestyle="--",
+            color="0.5",
+            linewidth=1.6,
+            alpha=0.9,
+            label="Quadratic fit",
+        )
+    )
+    legend_labels.append("Quadratic fit")
+    ax.legend(legend_handles, legend_labels, frameon=False, fontsize=15, loc="upper right")
+    if y_range[1] < 5.:
+        fig.subplots_adjust(left=0.12, right=0.98, bottom=0.14, top=0.98)
+    else:
+        fig.subplots_adjust(left=0.08, right=0.98, bottom=0.14, top=0.98)
+
+    output_path = os.path.join(out_root, outfilename)
+    fig.savefig(output_path)
+    print(f"--> Plotted mean noise vs cell area: {output_path}")
+    plt.close(fig)
+
+
+def _plot_mean_vs_cell_area(
+    cfg: classes.AnalysisConfig,
+    value_iterator,
+    column_tags: list[str],
+    out_root: str,
+    window: Optional[Tuple[float, float]],
+    ylabel: str,
+    outfilename: str,
+    x_range: Optional[Tuple[float, float]] = None,
+    y_range: Optional[Tuple[float, float]] = None,
+) -> None:
+    os.makedirs(out_root, exist_ok=True)
+
+    tags_to_plot = [""]
+    for tag in column_tags:
+        if tag not in tags_to_plot:
+            tags_to_plot.append(tag)
+
+    cell_areas, cell_area_fractions = _load_cell_areas(cfg)
+    full_cell_area_mm2 = _full_cell_area_mm2(cell_areas, cell_area_fractions)
+    colors = ["black", "tab:blue", "tab:red", "tab:green", "tab:orange", "tab:purple"]
+    violin_width = _violin_width(cell_area_fractions[cell_area_fractions > 0.0])
+
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    prepared_curves = []
+    max_group_count = 0
+
+    for idx, column_tag in enumerate(tags_to_plot):
+        varname_template = f"adc_ch*_pedsub{column_tag}"
+        try:
+            channel_mean, _, channel_counts = _compute_channel_mean_and_rms(
+                varname_template=varname_template,
+                value_iterator=value_iterator,
+                window=window,
+            )
+        except ValueError as exc:
+            print(f"[info] Skipping mean-vs-cell-area curve for {column_tag or 'uncorrected'}: {exc}")
+            continue
+
+        valid = np.isfinite(cell_areas) & (cell_areas > 0.0) & np.isfinite(channel_mean) & (channel_counts > 0)
+        if not np.any(valid):
+            print(f"[info] No valid channels available for mean-vs-cell-area curve: {column_tag or 'uncorrected'}")
+            continue
+
+        area_fractions_valid = cell_area_fractions[valid]
+        mean_valid = channel_mean[valid]
+        unique_area_fractions = np.unique(area_fractions_valid)
+        grouped_mean_area_fractions = [
+            mean_valid[area_fractions_valid == area_fraction]
+            for area_fraction in unique_area_fractions
+        ]
+        group_counts = np.asarray([values.size for values in grouped_mean_area_fractions], dtype=float)
+        if group_counts.size > 0:
+            max_group_count = max(max_group_count, int(np.max(group_counts)))
+
+        prepared_curves.append(
+            {
+                "x": unique_area_fractions,
+                "grouped_values": grouped_mean_area_fractions,
+                "group_counts": group_counts,
+                "raw_x": area_fractions_valid,
+                "raw_y": mean_valid,
+                "color": colors[idx % len(colors)],
+                "label": _column_tag_label(column_tag),
+            }
+        )
+
+    if not prepared_curves:
+        plt.close(fig)
+        print("[info] Skipping mean-vs-cell-area plot because no methods had valid inputs.")
+        return
+
+    width_norm = float(max_group_count) if max_group_count > 0 else 1.0
+
+    for curve in prepared_curves:
+        mean_area_fractions, sem_area_fractions = _group_mean_and_sem(curve["grouped_values"])
+        scaled_widths = violin_width * np.sqrt(curve["group_counts"] / width_norm)
+
+        _add_violin_groups(
+            ax=ax,
+            x_positions=curve["x"],
+            grouped_values=curve["grouped_values"],
+            color=curve["color"],
+            widths=scaled_widths,
+        )
+
+        ax.errorbar(
+            curve["x"],
+            mean_area_fractions,
+            yerr=sem_area_fractions,
+            fmt="o",
+            color=curve["color"],
+            linewidth=1.6,
+            markersize=5,
+            capsize=4,
+            label=curve["label"],
+        )
+        # _add_quadratic_fit(
+        #     ax=ax,
+        #     x=curve["raw_x"],
+        #     y=curve["raw_y"],
+        #     color=curve["color"],
+        #     label=curve["label"],
+        # )
+
+    ax.set_xlabel("Cell area / full cell area", fontsize=16, loc="right", labelpad=8)
+    ax.set_ylabel(ylabel, fontsize=16, loc="top", labelpad=10)
+    if x_range is not None:
+        ax.set_xlim(*x_range)
+    if y_range is not None:
+        ax.set_ylim(*y_range)
+    ax.tick_params(
+        axis="both",
+        which="both",
+        direction="in",
+        top=True,
+        right=True,
+        labelsize=13,
+        length=6,
+    )
+    _add_full_cell_area_tag(ax, full_cell_area_mm2=full_cell_area_mm2, fontsize=13)
+    legend_handles, legend_labels = ax.get_legend_handles_labels()
+    # legend_handles.append(
+    #     Line2D(
+    #         [0],
+    #         [0],
+    #         linestyle="--",
+    #         color="0.5",
+    #         linewidth=1.6,
+    #         alpha=0.9,
+    #         label="Quadratic fit",
+    #     )
+    # )
+    # legend_labels.append("Quadratic fit")
+    ax.legend(legend_handles, legend_labels, frameon=False, fontsize=13)
+    fig.subplots_adjust(left=0.10, right=0.98, bottom=0.14, top=0.98)
+
+    output_path = os.path.join(out_root, outfilename)
+    fig.savefig(output_path)
+    print(f"--> Plotted mean ADC vs cell area: {output_path}")
+    plt.close(fig)
+
+
+def plot_noise_vs_cell_area_window_rms(
+    cfg: classes.AnalysisConfig,
+    value_iterator,
+    column_tags: list[str],
+    out_root: str,
+    x_range: Optional[Tuple[float, float]] = None,
+    y_range: Optional[Tuple[float, float]] = None,
+) -> None:
+    _plot_noise_vs_cell_area_rms(
+        cfg=cfg,
+        value_iterator=value_iterator,
+        column_tags=column_tags,
+        out_root=out_root,
+        window=(-10.0, 10.0),
+        ylabel="Mean noise (ADC units)",
+        outfilename="mean_noise_vs_cell_area_window_rms_overlay.pdf",
+        x_range=x_range,
+        y_range=y_range,
+    )
+
+
+def plot_mean_vs_cell_area_window_mean(
+    cfg: classes.AnalysisConfig,
+    value_iterator,
+    column_tags: list[str],
+    out_root: str,
+    x_range: Optional[Tuple[float, float]] = None,
+    y_range: Optional[Tuple[float, float]] = None,
+) -> None:
+    _plot_mean_vs_cell_area(
+        cfg=cfg,
+        value_iterator=value_iterator,
+        column_tags=column_tags,
+        out_root=out_root,
+        window=(-10.0, 10.0),
+        ylabel="Mean ADC [-10, 10]",
+        outfilename="mean_adc_vs_cell_area_window_mean_overlay.pdf",
+        x_range=x_range,
+        y_range=y_range,
+    )
+
+
+def plot_noise_vs_cell_area_full_rms(
+    cfg: classes.AnalysisConfig,
+    value_iterator,
+    column_tags: list[str],
+    out_root: str,
+    x_range: Optional[Tuple[float, float]] = None,
+    y_range: Optional[Tuple[float, float]] = None,
+) -> None:
+    _plot_noise_vs_cell_area_rms(
+        cfg=cfg,
+        value_iterator=value_iterator,
+        column_tags=column_tags,
+        out_root=out_root,
+        window=None,
+        ylabel="Mean channel RMS",
+        outfilename="mean_noise_vs_cell_area_full_rms_overlay.pdf",
+        x_range=x_range,
+        y_range=y_range,
+    )
 
 
 def plot_summary_1d_multicol(varname_template: str, varname_true_template: str, value_iterator, out_root: str, nbins_x: int = None, x_range=None):

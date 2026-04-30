@@ -12,6 +12,7 @@ from tqdm import tqdm  # type: ignore
 import classes
 import dnn_models
 import inferencers
+import utils
 
 
 defaults = {
@@ -38,6 +39,12 @@ def main():
     p.add_argument("--pedestal-run", type=int, default=112044)
 
     p.add_argument("--batch-samples", type=int, default=defaults["batch_samples"])
+    p.add_argument(
+        "--selection-for-correction",
+        type=str,
+        default="",
+        help="Optional selection tag encoded in the correction-artifact folder.",
+    )
 
     p.add_argument("--noprogbar", action="store_true")
     p.add_argument("--override-name", action="store_true")
@@ -58,6 +65,7 @@ def main():
             run_for_pedestal=args.pedestal_run,
             run_for_correction=args.run,
             module_for_correction=x,
+            selection_for_correction=args.selection_for_correction,
             standardize_std = False,
             inputfoldertag = "",
         )
@@ -335,11 +343,31 @@ def run_eval_epoch(
 
 
 def save_training_state(modelfolder, model, train_losses, test_losses, is_best=False):
+    state_dict = model.state_dict()
+    train_arr = np.asarray(train_losses, dtype=np.float64)
+    test_arr = np.asarray(test_losses, dtype=np.float64)
+
     if is_best:
-        torch.save(model.state_dict(), os.path.join(modelfolder, "dnn_best.pth"))
-    torch.save(model.state_dict(), os.path.join(modelfolder, "dnn_last.pth"))
-    np.save(os.path.join(modelfolder, "train_losses.npy"), np.asarray(train_losses, dtype=np.float64))
-    np.save(os.path.join(modelfolder, "test_losses.npy"), np.asarray(test_losses, dtype=np.float64))
+        utils.write_via_tmpdir(
+            outfilename=os.path.join(modelfolder, "dnn_best.pth"),
+            suffix=".pth",
+            writer_fn=lambda tmp, state=state_dict: torch.save(state, tmp),
+        )
+    utils.write_via_tmpdir(
+        outfilename=os.path.join(modelfolder, "dnn_last.pth"),
+        suffix=".pth",
+        writer_fn=lambda tmp, state=state_dict: torch.save(state, tmp),
+    )
+    utils.write_via_tmpdir(
+        outfilename=os.path.join(modelfolder, "train_losses.npy"),
+        suffix=".npy",
+        writer_fn=lambda tmp, arr=train_arr: np.save(tmp, arr),
+    )
+    utils.write_via_tmpdir(
+        outfilename=os.path.join(modelfolder, "test_losses.npy"),
+        suffix=".npy",
+        writer_fn=lambda tmp, arr=test_arr: np.save(tmp, arr),
+    )
 
 
 def masked_mse(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:

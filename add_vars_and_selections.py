@@ -52,6 +52,12 @@ def main():
         required=True,
         help="Module whose correction context this output should correspond to.",
     )
+    parser.add_argument(
+        "--selection-for-correction",
+        type=str,
+        default="",
+        help="Optional selection tag encoded in the correction-artifact folder.",
+    )
     args = parser.parse_args()
 
 
@@ -62,6 +68,7 @@ def main():
             run_for_pedestal=args.pedestal_run,
             run_for_correction=args.run,
             module_for_correction=args.module_for_correction,
+            selection_for_correction=args.selection_for_correction,
             standardize_std = False,
             inputfoldertag = "",
         )
@@ -156,6 +163,20 @@ def add_vars_and_selections(cfg, inferencer) -> None:
 
 
         for sel_col, expr in selections_per_selstring.items():
+            if sel_col == "selection_trigtime":
+                if "source_is_pedestal" not in df_chunk.columns:
+                    raise KeyError(
+                        "Column 'source_is_pedestal' is required to evaluate "
+                        "'selection_trigtime'. Rerun convert_to_df to regenerate "
+                        "the parquet inputs with per-event source provenance."
+                    )
+
+                trig_mask = pd.Series(False, index=df_chunk.index)
+                if "trig_time" in df_chunk.columns:
+                    trig_mask = (df_chunk["trig_time"] > 107) & (df_chunk["trig_time"] < 113)
+
+                df_chunk[sel_col] = df_chunk["source_is_pedestal"].astype(bool) | trig_mask
+                continue
             if not expr:
                 df_chunk[sel_col] = True
             else:
@@ -166,7 +187,11 @@ def add_vars_and_selections(cfg, inferencer) -> None:
 
         # overwrite file
         outfilename = os.path.join(cfg.analysis_inputs_folder, f"df_batch{idx:03d}.parquet")
-        df_chunk.to_parquet(outfilename, engine="pyarrow", index=True, compression="zstd")
+        utils.write_via_tmpdir(
+            outfilename=outfilename,
+            suffix=".parquet",
+            writer_fn=lambda tmp, chunk=df_chunk: chunk.to_parquet(tmp, engine="pyarrow", index=True, compression="zstd"),
+        )
 
         print(f"Wrote updated df with additional variables and selection decisions to {outfilename}, overwriting existing file.")
 

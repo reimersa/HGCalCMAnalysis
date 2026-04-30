@@ -52,6 +52,12 @@ def main():
         required=True,
         help="Module from which the correction artifacts should be loaded.",
     )
+    parser.add_argument(
+        "--selection-for-correction",
+        type=str,
+        default="",
+        help="Optional selection tag encoded in the correction-artifact folder.",
+    )
     args = parser.parse_args()
 
 
@@ -62,6 +68,7 @@ def main():
             run_for_pedestal=args.pedestal_run,
             run_for_correction=args.run,
             module_for_correction=args.module_for_correction,
+            selection_for_correction=args.selection_for_correction,
             standardize_std = False,
             inputfoldertag = "",
         )
@@ -111,7 +118,11 @@ def add_correction_analytic(cfg, inferencer) -> None:
 
         # overwrite file
         outfilename = os.path.join(cfg.analysis_inputs_folder, f"df_batch{idx:03d}.parquet")
-        df_chunk.to_parquet(outfilename, engine="pyarrow", index=True, compression="zstd")
+        utils.write_via_tmpdir(
+            outfilename=outfilename,
+            suffix=".parquet",
+            writer_fn=lambda tmp, chunk=df_chunk: chunk.to_parquet(tmp, engine="pyarrow", index=True, compression="zstd"),
+        )
 
         print(f"Wrote updated df with analytic predictions and residuals, including a version using unconnected channes as well, to {outfilename}, overwriting existing file.")
 

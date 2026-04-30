@@ -66,6 +66,12 @@ def main():
         required=True,
         help="Module from which the noise-subtraction artifacts should be loaded.",
     )
+    parser.add_argument(
+        "--selection-for-correction",
+        type=str,
+        default="",
+        help="Optional selection tag encoded in the correction-artifact folder.",
+    )
     args = parser.parse_args()
 
 
@@ -76,6 +82,7 @@ def main():
             run_for_pedestal=args.pedestal_run,
             run_for_correction=args.run,
             module_for_correction=args.module_for_correction,
+            selection_for_correction=args.selection_for_correction,
             standardize_std = False,
             inputfoldertag = "",
         )

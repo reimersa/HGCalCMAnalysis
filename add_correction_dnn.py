@@ -14,6 +14,7 @@ import dnn_models
 import inferencers
 import prepare_dnn_inputs
 import functions_plot
+import utils
 
 
 """
@@ -50,6 +51,12 @@ def main():
         type=str,
         required=True,
         help="Module from which the DNN correction artifacts should be loaded.",
+    )
+    parser.add_argument(
+        "--selection-for-correction",
+        type=str,
+        default="",
+        help="Optional selection tag encoded in the correction-artifact folder.",
     )
 
     # --- DNN config / checkpoint ---
@@ -98,6 +105,7 @@ def main():
             run_for_pedestal=args.pedestal_run,
             run_for_correction=args.run,
             module_for_correction=args.module_for_correction,
+            selection_for_correction=args.selection_for_correction,
             standardize_std=False,
             inputfoldertag="",
         )
@@ -181,7 +189,11 @@ def add_correction_dnn(cfg, inferencer, nodes: list[int], dropout: float, tag: s
         df_chunk[f"adc_sum_pedsub{column_tag}_resid_dnn"] = df_chunk[[f"{x}_resid_dnn" for x in columns_to_predict]].sum(axis=1, skipna=True)
 
         outfilename = os.path.join(cfg.analysis_inputs_folder, f"df_batch{idx:03d}.parquet")
-        df_chunk.to_parquet(outfilename, engine="pyarrow", index=True, compression="zstd")
+        utils.write_via_tmpdir(
+            outfilename=outfilename,
+            suffix=".parquet",
+            writer_fn=lambda tmp, chunk=df_chunk: chunk.to_parquet(tmp, engine="pyarrow", index=True, compression="zstd"),
+        )
         print(f"Wrote updated df with DNN predictions and residuals to {outfilename}, overwriting possibly existing columns in existing file.")
 
     print(f"Now plotting loss")

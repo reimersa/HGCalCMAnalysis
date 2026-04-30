@@ -45,6 +45,12 @@ def main():
         required=True,
         help="Module whose correction context should be fit.",
     )
+    parser.add_argument(
+        "--selection-for-correction",
+        type=str,
+        default="",
+        help="Optional selection tag encoded in the correction-artifact folder.",
+    )
     args = parser.parse_args()
 
     cfgs = [
@@ -54,6 +60,7 @@ def main():
             run_for_pedestal=_maybe_int(args.pedestal_run),
             run_for_correction=_maybe_int(args.correction_run),
             module_for_correction=args.module_for_correction,
+            selection_for_correction=args.selection_for_correction,
             standardize_std=False,
             inputfoldertag="",
         )
@@ -168,29 +175,20 @@ def fit_covariance_noise_model(cfg, column_tag: str, n_coherent: int = 1, max_nf
         columns=[f"coh_source_{idx:02d}" for idx in range(n_coherent)],
     )
 
-    df_summary.to_parquet(os.path.join(cfg.noise_model_fit_folder, f"noise_model_summary_mm{fit_tag}.parquet"), index=False, compression="zstd")
-    df_channels.to_parquet(os.path.join(cfg.noise_model_fit_folder, f"noise_model_channels_mm{fit_tag}.parquet"), index=True, compression="zstd")
-    df_loadings.to_parquet(os.path.join(cfg.noise_model_fit_folder, f"noise_model_loadings_mm{fit_tag}.parquet"), index=True, compression="zstd")
-    pd.DataFrame(sigma_model, index=sigma_mm_df.index, columns=sigma_mm_df.columns).to_parquet(
-        os.path.join(cfg.noise_model_fit_folder, f"sigma_mm_model{fit_tag}.parquet"),
-        index=True,
-        compression="zstd",
-    )
-    pd.DataFrame(sigma_coherent, index=sigma_mm_df.index, columns=sigma_mm_df.columns).to_parquet(
-        os.path.join(cfg.noise_model_fit_folder, f"sigma_mm_coherent{fit_tag}.parquet"),
-        index=True,
-        compression="zstd",
-    )
-    pd.DataFrame(sigma_incoherent, index=sigma_mm_df.index, columns=sigma_mm_df.columns).to_parquet(
-        os.path.join(cfg.noise_model_fit_folder, f"sigma_mm_incoherent{fit_tag}.parquet"),
-        index=True,
-        compression="zstd",
-    )
-    pd.DataFrame(sigma_residual, index=sigma_mm_df.index, columns=sigma_mm_df.columns).to_parquet(
-        os.path.join(cfg.noise_model_fit_folder, f"sigma_mm_fitresidual{fit_tag}.parquet"),
-        index=True,
-        compression="zstd",
-    )
+    def write_df(df: pd.DataFrame, filename: str, index: bool = True) -> None:
+        utils.write_via_tmpdir(
+            outfilename=os.path.join(cfg.noise_model_fit_folder, filename),
+            suffix=".parquet",
+            writer_fn=lambda tmp, data=df, use_index=index: data.to_parquet(tmp, index=use_index, compression="zstd"),
+        )
+
+    write_df(df_summary, f"noise_model_summary_mm{fit_tag}.parquet", index=False)
+    write_df(df_channels, f"noise_model_channels_mm{fit_tag}.parquet")
+    write_df(df_loadings, f"noise_model_loadings_mm{fit_tag}.parquet")
+    write_df(pd.DataFrame(sigma_model, index=sigma_mm_df.index, columns=sigma_mm_df.columns), f"sigma_mm_model{fit_tag}.parquet")
+    write_df(pd.DataFrame(sigma_coherent, index=sigma_mm_df.index, columns=sigma_mm_df.columns), f"sigma_mm_coherent{fit_tag}.parquet")
+    write_df(pd.DataFrame(sigma_incoherent, index=sigma_mm_df.index, columns=sigma_mm_df.columns), f"sigma_mm_incoherent{fit_tag}.parquet")
+    write_df(pd.DataFrame(sigma_residual, index=sigma_mm_df.index, columns=sigma_mm_df.columns), f"sigma_mm_fitresidual{fit_tag}.parquet")
 
     print(
         f"Fitted covariance noise model with n_coherent={n_coherent} for sigma_mm{artifact_tag}. "

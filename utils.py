@@ -1,4 +1,8 @@
 import os
+import shutil
+import tempfile
+import time
+import uuid
 import psutil # type: ignore
 import numpy as np
 import matplotlib.pyplot as plt # type: ignore
@@ -6,7 +10,7 @@ import matplotlib.gridspec as gridspec # type: ignore
 import matplotlib.colors as mcolors # type: ignore
 import matplotlib.ticker as ticker # type: ignore
 from matplotlib.patches import RegularPolygon # type: ignore
-from typing import Union, List, Iterable, Optional, Tuple
+from typing import Callable, Union, List, Iterable, Optional, Tuple
 import pandas as pd # type: ignore
 import math
 
@@ -18,6 +22,61 @@ def count_parameters(model):
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return total, trainable
+
+
+def write_via_tmpdir(
+    outfilename: str,
+    writer_fn: Callable[[str], None],
+    suffix: str = "",
+    retries: int = 3,
+    retry_delay: float = 2.0,
+) -> None:
+    tmp_root = os.environ.get("TMPDIR", "/tmp")
+    os.makedirs(tmp_root, exist_ok=True)
+
+    outdir = os.path.dirname(outfilename)
+    if outdir:
+        os.makedirs(outdir, exist_ok=True)
+
+    local_tmp = None
+    eos_tmp = f"{outfilename}.tmp.{uuid.uuid4().hex}"
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=suffix,
+            prefix="hgcal_cm_",
+            dir=tmp_root,
+            delete=False,
+        ) as handle:
+            local_tmp = handle.name
+
+        writer_fn(local_tmp)
+
+        last_exc = None
+        for attempt in range(1, retries + 1):
+            try:
+                shutil.copyfile(local_tmp, eos_tmp)
+                os.replace(eos_tmp, outfilename)
+                return
+            except OSError as exc:
+                last_exc = exc
+                print(f"[WARNING] Failed to copy file to EOS (attempt {attempt}/{retries}): {exc}")
+                try:
+                    if os.path.exists(eos_tmp):
+                        os.remove(eos_tmp)
+                except OSError:
+                    pass
+                if attempt < retries:
+                    time.sleep(retry_delay)
+
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(f"Failed to write output file '{outfilename}' via TMPDIR staging.")
+    finally:
+        if local_tmp and os.path.exists(local_tmp):
+            os.remove(local_tmp)
+        if os.path.exists(eos_tmp):
+            os.remove(eos_tmp)
 
 def compute_cov_streaming(
     iter_i,

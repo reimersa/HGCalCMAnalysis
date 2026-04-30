@@ -74,6 +74,12 @@ def main():
         metavar="SEL",
         help="Only plot events for which the column 'selection_{SEL}' is true. These need to be constructed and added to the df before, of course.",
     )
+    parser.add_argument(
+        "--selection-for-correction",
+        type=str,
+        default="",
+        help="Optional selection tag encoded in the correction-artifact folder.",
+    )
     args = parser.parse_args()
 
 
@@ -84,6 +90,7 @@ def main():
             run_for_pedestal=args.pedestal_run,
             run_for_correction=args.run,
             module_for_correction=args.module_for_correction,
+            selection_for_correction=args.selection_for_correction,
             standardize_std = False,
             inputfoldertag = "",
         )
@@ -143,8 +150,8 @@ def plot(cfg, inferencer, column_tag, selection, n_coherent_noise_model: int = 1
     # functions_plot.plot_2d_multicol_vs_var(varname_x=f"adc_sum_allchannels_pedsub", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_adcsum", method_subfolder), nbins_y=80, y_range=yrange, nbins_x=100)
 
     # ## plots per eRx
-    # for erx in range(cfg.nerx):
-    #     functions_plot.plot_2d_multicol_vs_var(varname_x=f"cm_erx{erx:02d}_pedsub", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_cm", method_subfolder), nbins_y=75, x_range=(-50, 25), y_range=yrange)
+    for erx in range(cfg.nerx):
+        functions_plot.plot_2d_multicol_vs_var(varname_x=f"cm_erx{erx:02d}_pedsub", varname_y_template=adc_ch_pattern, value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_2d_vs_cm", method_subfolder), nbins_y=75, x_range=(-50, 25), y_range=yrange)
         # functions_plot.plot_2d_multicol_vs_var(varname_x=f"cm_erx{erx:02d}_pedsub", varname_y_template=f"proj_mode0_adc_chall_pedsub{column_tag}", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "per_channel_projmode0_2d_vs_cm", method_subfolder), nbins_y=80, y_range=yrange)
         # functions_plot.plot_2d_multicol_vs_var(varname_x=f"nchtoa", varname_y_template=f"cm_erx{erx:02d}_pedsub", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "cm_2d_vs_ntoa", method_subfolder), nbins_y=80, y_range=(-30, 30))
         # functions_plot.plot_2d_multicol_vs_var(varname_x=f"adc_sum_pedsub", varname_y_template=f"cm_erx{erx:02d}_pedsub", value_iterator=inferencer.full_df_iter, out_root=os.path.join(plot_dir, "cm_2d_vs_adcsum", method_subfolder), nbins_y=80, y_range=(-30, 30), nbins_x=100)

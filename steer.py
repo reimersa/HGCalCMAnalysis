@@ -19,6 +19,7 @@ import plot
 import prepare_dnn_inputs
 import train_dnn
 import add_correction_dnn
+import plot_summaries
 
 
 
@@ -63,7 +64,11 @@ def main():
             # run="112073_outer",
             # run="112060_outer",
 
+            derive_correction = False,
+            selection_for_correction = selection,
+
             run_for_pedestal=112044,
+            # run_for_correction=112044, 
             run_for_correction="112044_112050_112060_112073_adcmax10", 
             # run_for_correction="112044_112050_112060_112073_adcmax30", 
             module_for_correction="ML_F3WC_IH0182",
@@ -87,7 +92,7 @@ def main():
         # compute_covariances_and_eigen.compute_covariances_and_eigen(cfg=cfg, inferencer=inferencer, column_tag="")
         # fit_covariance_noise_model.fit_covariance_noise_model(cfg=cfg, column_tag="", n_coherent=n_coherent_noise_model)
 
-        # if cfg.is_pedestal:
+        # if cfg.derive_correction:
         #     compute_predictor_analytic.compute_predictor_analytic(cfg=cfg)
 
         # add_correction_analytic.add_correction_analytic(cfg=cfg, inferencer=inferencer)
@@ -110,14 +115,24 @@ def main():
         inferencer_sel = inferencers.AnalysisTruthInferencer(cfg=cfg, selection=selection)
 
 
-        # if cfg.is_pedestal:
+        # if cfg.derive_correction:
             # prepare_dnn_inputs.prepare_dnn_inputs(cfg=cfg, column_tag="", inferencer=inferencer_sel, nch_to_use=None)
             # add_vars_and_selections.add_vars_and_selections(cfg=cfg, inferencer=inferencer) # rerun to add train/test split as columns to main df
 
-        #     ## DNNs for ped+outer-beam
+            ## selection_full -> no tag
             # train_dnn.train_dnn(cfg=cfg, noprogbar=False, per_channel_cols=["channel_indices", "erx_indices"]+[f"eigvec_{i}" for i in range(20)]+[f"adc_unconnected_{i:02d}" for i in range(4)], nodes=[32, 32], dropout=0.00, tag="", batch_samples=1024, epochs=1000)
+
+            # selection_trigtime
+            # train_dnn.train_dnn(cfg=cfg, noprogbar=False, per_channel_cols=["channel_indices", "erx_indices"]+[f"eigvec_{i}" for i in range(20)]+[f"adc_unconnected_{i:02d}" for i in range(4)], nodes=[32, 32], dropout=0.00, tag="trigtime", batch_samples=1024, epochs=1000)
+            # train_dnn.train_dnn(cfg=cfg, noprogbar=False, per_channel_cols=["channel_indices", "erx_indices"]+[f"eigvec_{i}" for i in range(20)]+[f"adc_unconnected_{i:02d}" for i in range(4)], nodes=[128, 128, 128, 32], dropout=0.00, tag="trigtime", batch_samples=1024, epochs=1000)
         
+        # selection_full -> no tag
         # add_correction_dnn.add_correction_dnn(cfg, inferencer, nodes=[32, 32], dropout=0.0, tag="", column_tag="", per_channel_cols=["channel_indices", "erx_indices"]+[f"eigvec_{i}" for i in range(20)]+[f"adc_unconnected_{i:02d}" for i in range(4)], infer_batch=8192, plot_dir_loss=os.path.join(cfg.plotfolder_base, selection, "dnn_loss"))
+        
+        # selection_trigtime -> tag 'trigtime'
+        # add_correction_dnn.add_correction_dnn(cfg, inferencer, nodes=[32, 32], dropout=0.0, tag="trigtime", column_tag="", per_channel_cols=["channel_indices", "erx_indices"]+[f"eigvec_{i}" for i in range(20)]+[f"adc_unconnected_{i:02d}" for i in range(4)], infer_batch=8192, plot_dir_loss=os.path.join(cfg.plotfolder_base, selection, "dnn_loss"))
+        # add_vars_and_selections.add_vars_and_selections(cfg=cfg, inferencer=inferencer)
+        # add_correction_dnn.add_correction_dnn(cfg, inferencer, nodes=[128, 128, 128, 32], dropout=0.0, tag="trigtime", column_tag="", per_channel_cols=["channel_indices", "erx_indices"]+[f"eigvec_{i}" for i in range(20)]+[f"adc_unconnected_{i:02d}" for i in range(4)], infer_batch=8192, plot_dir_loss=os.path.join(cfg.plotfolder_base, selection, "dnn_loss"))
         # add_vars_and_selections.add_vars_and_selections(cfg=cfg, inferencer=inferencer)
 
         # compute_covariances_and_eigen.compute_covariances_and_eigen(cfg=cfg, inferencer=inferencer, column_tag="_pred_dnn")
@@ -132,7 +147,7 @@ def main():
         # plot.plot_coherent_noise(cfg=cfg, inferencer=inferencer_sel, column_tag="_resid_dnn", selection=selection, trunc_fracs=(1.0,))
 
 
-        plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="", selection=selection, n_coherent_noise_model=n_coherent_noise_model)
+        # plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="", selection=selection, n_coherent_noise_model=n_coherent_noise_model)
         # plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="_resid_analytic_k0", selection=selection, n_coherent_noise_model=n_coherent_noise_model)
         plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="_resid_dnn", selection=selection, n_coherent_noise_model=n_coherent_noise_model)
         # plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="_pred_analytic_k0", selection=selection, n_coherent_noise_model=n_coherent_noise_model)
@@ -141,6 +156,7 @@ def main():
         # plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="_pred_analytic_with_unconnected_k0", selection=selection)
         # plot.plot(cfg=cfg, inferencer=inferencer_sel, column_tag="_resid_analytic_with_unconnected_k0", selection=selection)
 
+        plot_summaries.plot_summaries(cfg=cfg, inferencer=inferencer_sel, selection=selection, column_tags=["_resid_analytic_k0", "_resid_dnn"], y_range=(0, 5.0))
 
 
 

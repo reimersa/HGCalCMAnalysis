@@ -9,6 +9,7 @@ import argparse
 from tqdm import tqdm # type: ignore
 
 import classes
+import utils
 
 
 
@@ -102,15 +103,23 @@ def calculate_means_stds(cfg, print_vals: bool=False) -> None:
         for k, v in per_channel_stds.items():
             print(f"  per-channel stds {k}: {v.shape}\n{v}")
 
-    with open(f"{cfg.pedestal_mean_std_folder}/means_scalar.json", "w") as f:
-        json.dump(scalar_means, f)
-    with open(f"{cfg.pedestal_mean_std_folder}/stds_scalar.json", "w") as f:
-        json.dump(scalar_stds, f)
-    with open(f"{cfg.pedestal_mean_std_folder}/means_vector.json", "w") as f:
-        json.dump({k: v.tolist() for k, v in per_channel_means.items()}, f)
-    with open(f"{cfg.pedestal_mean_std_folder}/stds_vector.json", "w") as f:
-        json.dump({k: v.tolist() for k, v in per_channel_stds.items()}, f)
+    def write_json(payload, filename: str) -> None:
+        utils.write_via_tmpdir(
+            outfilename=os.path.join(cfg.pedestal_mean_std_folder, filename),
+            suffix=".json",
+            writer_fn=lambda tmp, data=payload: _dump_json(tmp, data),
+        )
+
+    write_json(scalar_means, "means_scalar.json")
+    write_json(scalar_stds, "stds_scalar.json")
+    write_json({k: v.tolist() for k, v in per_channel_means.items()}, "means_vector.json")
+    write_json({k: v.tolist() for k, v in per_channel_stds.items()}, "stds_vector.json")
     print(f"Means and stds saved in folder: {cfg.pedestal_mean_std_folder}")
+
+
+def _dump_json(path: str, payload) -> None:
+    with open(path, "w") as handle:
+        json.dump(payload, handle)
 
 
 

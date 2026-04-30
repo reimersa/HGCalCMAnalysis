@@ -1,4 +1,5 @@
 import os
+import re
 from glob import glob
 import numpy as np # type: ignore
 import pandas as pd # type: ignore
@@ -7,6 +8,8 @@ from typing import List, Optional, Dict, Tuple, Iterable, Union
 from dataclasses import dataclass, field
 
 import utils
+
+PEDESTAL_RUNS = {110398, 112044, 1747296821}
 
 
 class Batch:
@@ -65,6 +68,10 @@ class AnalysisBatchIter:
             yield Batch(df, self.cfg)
 
 
+def is_pedestal_run(run: Union[int, str]) -> bool:
+    return run in PEDESTAL_RUNS
+
+
 
 @dataclass
 class AnalysisConfig:
@@ -78,7 +85,8 @@ class AnalysisConfig:
     runs_per_synthetic_run: dict[str, list[Union[int, str]]] = field(default_factory=dict)
     channel_ucoords_to_keep_per_run: dict[int, list[int]] = field(default_factory=dict)
 
-    derive_corrections: bool = False
+    derive_correction: bool = False
+    selection_for_correction: str = ""
     standardize_std: bool = False
     is_pedestal: bool = False
     maxfiles_for_eval: int = None
@@ -107,10 +115,7 @@ class AnalysisConfig:
     def __post_init__(self):
         self.inputfoldertag = utils.get_input_tag(basetag=self.inputfoldertag, normalize_to_unit_area=False, remove_disconnected=False, standardize_std=self.standardize_std)
         self.infer_layout()
-        correction_subfolder = os.path.join(
-            f"corrections_from_Module{self.module_for_correction}",
-            f"corrections_from_Run{self.run_for_correction}",
-        )
+        correction_subfolder = self.get_correction_subfolder()
 
         self.datafolder_base                 = "/eos/user/a/areimers/hgcal/Sep2025TB"
         self.histofiller_folder              = self.get_histofiller_folder()
@@ -119,15 +124,13 @@ class AnalysisConfig:
         self.own_covs_folder                 = os.path.join(self.datafolder_base, f"Run{self.run}/covs{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}", correction_subfolder)
         self.noise_model_fit_folder          = os.path.join(self.own_covs_folder, "noise_model_fits")
 
-        self.corrections_base_folder   = os.path.join(self.datafolder_base, f"corrections{self.inputfoldertag}", self.module_for_correction, f"pedestals_from_Run{self.run_for_pedestal}", correction_subfolder)
+        self.corrections_base_folder   = os.path.join(self.datafolder_base, f"corrections{self.inputfoldertag}", str(self.get_correction_module()), f"pedestals_from_Run{self.run_for_pedestal}", correction_subfolder)
         self.analytic_predictor_folder = os.path.join(self.corrections_base_folder, "predictors")
         self.dnn_models_folder         = os.path.join(self.corrections_base_folder, "dnn_models")
         self.dnn_training_input_folder = os.path.join(self.corrections_base_folder, "dnn_training_inputs")
-        self.corrections_covs_folder   = os.path.join(self.datafolder_base, f"Run{self.run_for_correction}/covs{self.inputfoldertag}/{self.module_for_correction}/pedestals_from_Run{self.run_for_pedestal}", correction_subfolder)
+        self.corrections_covs_folder   = os.path.join(self.datafolder_base, f"Run{self.get_correction_run()}/covs{self.inputfoldertag}/{self.get_correction_module()}/pedestals_from_Run{self.run_for_pedestal}", correction_subfolder)
 
-
-
-        self.is_pedestal = self.run in [110398, 112044, 1747296821, "112044_112050", "112044_112050_full", "112044_112050_112060_112073_adcmax10", "112044_112050_112060_112073_adcmax30"]
+        self.is_pedestal = is_pedestal_run(self.run)
 
         self.runs_per_synthetic_run = {
             "112050_adcmax50": [112050],
@@ -140,6 +143,7 @@ class AnalysisConfig:
             "112068_adcmax10": [112068],
             "112044_112050_112060_112073_adcmax10": [112044, 112050, 112060, 112073],
             "112044_112050_112060_112073_adcmax30": [112044, 112050, 112060, 112073],
+            "112050_112060_112073_adcmax10": [112050, 112060, 112073],
         }
 
         self.runs_to_select_rings_for = ["112044_112050", "112073_outer", "112060_outer"]
@@ -160,6 +164,7 @@ class AnalysisConfig:
             "112068_adcmax10": 10,
             "112044_112050_112060_112073_adcmax10": 10,
             "112044_112050_112060_112073_adcmax30": 30,
+            "112050_112060_112073_adcmax10": 10,
         }
         self.adcmax = None
         if self.run in self.adcmax_per_run.keys():
@@ -179,6 +184,37 @@ class AnalysisConfig:
 
     def get_histofiller_folder(self):
         return os.path.join(self.datafolder_base, f"output/Run{self.run}/histofiller")
+
+    def _sanitize_correction_tag(self, value: str) -> str:
+        cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value).strip())
+        cleaned = cleaned.strip("_")
+        if not cleaned:
+            raise ValueError(f"Could not derive a stable correction tag from value={value!r}")
+        return cleaned
+
+    def get_correction_module(self):
+        return self.modulename if self.derive_correction else self.module_for_correction
+
+    def get_correction_run(self):
+        return self.run if self.derive_correction else self.run_for_correction
+
+    def get_correction_tag(self):
+        tags = []
+        if self.corrections_tag:
+            tags.append(self._sanitize_correction_tag(self.corrections_tag))
+        if self.selection_for_correction:
+            tags.append(self._sanitize_correction_tag(self.selection_for_correction))
+        return "__".join(tags)
+
+    def get_correction_subfolder(self):
+        parts = [
+            f"corrections_from_Module{self.get_correction_module()}",
+            f"corrections_from_Run{self.get_correction_run()}",
+        ]
+        correction_tag = self.get_correction_tag()
+        if correction_tag:
+            parts.append(f"corrections_tag_{correction_tag}")
+        return os.path.join(*parts)
 
     # derive defaults from module naming convention
     def infer_layout(self) -> None:

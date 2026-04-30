@@ -12,6 +12,7 @@ import argparse
 from copy import deepcopy
 
 import classes
+import utils
 
 ### This script can only be used for ANALYSIS, not to prepare inputs for training a DNN.
 
@@ -96,7 +97,12 @@ def convert_to_df(cfg, nevt_per_batch: int = 100000, adcmax=None):
         
         # Save to file
         outfilename = os.path.join(cfg.analysis_inputs_folder, f"df_batch{batch_idx:03d}.parquet")
-        df_chunk.to_parquet(outfilename, engine="pyarrow", index=True, compression="zstd")
+        # df_chunk.to_parquet(outfilename, engine="pyarrow", index=True, compression="zstd")
+        utils.write_via_tmpdir(
+            outfilename=outfilename,
+            suffix=".parquet",
+            writer_fn=lambda tmp, chunk=df_chunk: chunk.to_parquet(tmp, engine="pyarrow", index=True, compression="zstd"),
+        )
         print(f"[INFO]: Wrote analysis df with {len(df_chunk)} events to {outfilename}")
 
     print(f"--> Wrote all analysis dfs {cfg.analysis_inputs_folder}")
@@ -120,7 +126,12 @@ def convert_to_df_synthetic(cfg, nevt_per_batch: int=100000, adcmax=None):
             global_event_id += n
 
             outfilename = os.path.join(cfg.analysis_inputs_folder, f"df_batch{batch_idx:03d}.parquet")
-            df_chunk.to_parquet(outfilename, engine="pyarrow", index=True, compression="zstd")
+            # df_chunk.to_parquet(outfilename, engine="pyarrow", index=True, compression="zstd")
+            utils.write_via_tmpdir(
+                outfilename=outfilename,
+                suffix=".parquet",
+                writer_fn=lambda tmp, chunk=df_chunk: chunk.to_parquet(tmp, engine="pyarrow", index=True, compression="zstd"),
+            )
             batch_idx += 1
 
     print(f"--> Wrote all analysis dfs {cfg.analysis_inputs_folder}")
@@ -157,6 +168,8 @@ def iter_analysis_df_chunks(cfg, nevt_per_batch=100000, keepall=True, adcmax=Non
             mask_channels_above_adc(df=df_chunk, nch=cfg.nch, adcmax=adcmax)
         
         df_chunk = apply_mean_std(df=df_chunk, nch=cfg.nch, scalar_means=scalar_means, per_channel_means=per_channel_means, scalar_stds=scalar_stds, per_channel_stds=per_channel_stds, standardize_std=cfg.standardize_std)
+        df_chunk["source_run"] = cfg.run
+        df_chunk["source_is_pedestal"] = classes.is_pedestal_run(cfg.run)
 
         yield df_chunk
 

@@ -111,7 +111,11 @@ def add_projections_onto_noisemode(cfg, inferencer, column_tag, k: int) -> None:
 
         # overwrite file
         outfilename = os.path.join(cfg.analysis_inputs_folder, f"df_batch{idx:03d}.parquet")
-        df_chunk.to_parquet(outfilename, engine="pyarrow", index=True, compression="zstd")
+        utils.write_via_tmpdir(
+            outfilename=outfilename,
+            suffix=".parquet",
+            writer_fn=lambda tmp, chunk=df_chunk: chunk.to_parquet(tmp, engine="pyarrow", index=True, compression="zstd"),
+        )
 
         print(f"Wrote updated df with adc columns (tagged '{column_tag}') projected onto uncorrected noise mode {k} to {outfilename}, overwriting possibly existing file.")
 

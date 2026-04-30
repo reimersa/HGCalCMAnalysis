@@ -52,6 +52,12 @@ def main():
         ],
         help="List of module names to compute for.",
     )
+    parser.add_argument(
+        "--selection-for-correction",
+        type=str,
+        default="",
+        help="Optional selection tag encoded in the correction-artifact folder.",
+    )
     args = parser.parse_args()
 
 
@@ -62,6 +68,8 @@ def main():
             run_for_pedestal=args.pedestal_run,
             run_for_correction=args.pedestal_run,
             module_for_correction=x,
+            derive_correction=True,
+            selection_for_correction=args.selection_for_correction,
             standardize_std = False,
             inputfoldertag = "",
         )
@@ -74,8 +82,11 @@ def main():
 
 def compute_predictor_noisemodes(cfg, column_tag: str, k: int) -> None:
     print("Hello from compute_predictor_noisemodes()!")
-    if not cfg.is_pedestal:
-        raise ValueError(f"Trying to compute noise mode subtraction predictor from non-pedestal run {cfg.run}! Usually, one wants to use a pedestal run to compute a predictor. If you are *really* sure this is what you want, comment this error out.")
+    if not cfg.derive_correction:
+        raise ValueError(
+            "Trying to compute a noise-mode subtraction predictor with cfg.derive_correction=False. "
+            "Set derive_correction=True for configs that are meant to produce correction artifacts."
+        )
     # normally, one would compute this for analytic (k=0) residuals (using the corresponding column_tag), but we can do whatever we want :)
 
     # load eigenvectors/-vals for this column tag

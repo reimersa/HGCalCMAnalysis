@@ -11,6 +11,7 @@ import argparse
 
 import classes
 import inferencers
+import utils
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -77,6 +78,8 @@ def main() -> None:
             run_for_pedestal=args.pedestal_run,
             run_for_correction=args.run,
             module_for_correction=args.module_for_correction,
+            derive_correction=True,
+            selection_for_correction=args.selection,
             standardize_std=False,
             inputfoldertag="",
         ) 
@@ -86,6 +89,30 @@ def main() -> None:
         inferencer = inferencers.AnalysisTruthInferencer(cfg=cfg, selection=args.selection)
         prepare_dnn_inputs(cfg=cfg, column_tag=args.column_tag, inferencer=inferencer)
 
+
+
+def _load_cell_area_fractions(cfg, adc_channel_indices):
+    module_type = cfg.modulename[:4].replace("-", "_")
+    cellareas_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "data", "cellareas.json")
+    )
+
+    with open(cellareas_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+
+    if module_type not in payload:
+        raise KeyError(
+            f"Module type '{module_type}' not found in cell area file {cellareas_path}."
+        )
+
+    sfs = np.asarray(payload[module_type]["SF"], dtype=np.float32)
+    if sfs.shape[0] != cfg.nch:
+        raise ValueError(
+            f"Cell area count mismatch for module type '{module_type}': "
+            f"expected {cfg.nch}, found {sfs.shape[0]}."
+        )
+
+    return sfs[np.asarray(adc_channel_indices, dtype=np.int64)]
 
 
 def make_input_df(cfg, df, adc_channel_indices, column_tag):
@@ -103,6 +130,10 @@ def make_input_df(cfg, df, adc_channel_indices, column_tag):
 
     # ERX indices as list, one value per channel
     df_inputs["erx_indices"] = [[x - erx_indices_mean for x in erx_indices]] * len(df_inputs)
+
+    # Relative cell area, using the same SF normalization as the summary plots.
+    cell_area_fractions = _load_cell_area_fractions(cfg=cfg, adc_channel_indices=adc_channel_indices)
+    df_inputs["cell_area_fraction"] = [cell_area_fractions.tolist()] * len(df_inputs)
 
     # unconnected channels on the same e-Rx as the channel
     def _build_unconnected_feature(offset: int, out_col: str) -> None:
@@ -123,28 +154,6 @@ def make_input_df(cfg, df, adc_channel_indices, column_tag):
     _build_unconnected_feature(offset=17, out_col="adc_unconnected_01")
     _build_unconnected_feature(offset=19, out_col="adc_unconnected_02")
     _build_unconnected_feature(offset=28, out_col="adc_unconnected_03")
-
-    # scaled components of top 5 eigenvectors
-    vecs = cfg.load_from_corrections_cov_folder(filename=f"eigenvectors_mcmc{column_tag}.parquet")
-    vals = cfg.load_from_corrections_cov_folder(filename=f"eigenvalues_mcmc{column_tag}.parquet")
-    k = int(min(20, vecs.shape[1]))
-    top_vecs = vecs[[f"eigvec_{i}" for i in range(k)]]
-    vec_components_cm = top_vecs.loc[cm_columns]
-    vec_components_meas = top_vecs.drop(index=cm_columns)
-    
-    for i in range(k):
-        col = f"eigvec_{i}"
-        keep_rows = [f"adc_ch{idx:03}_pedsub{column_tag}" for idx in adc_channel_indices]
-        vec_meas = vec_components_meas[col].loc[keep_rows].to_numpy()   # shape (nch,)
-        val = vals["eigval"].loc[i]
-        df_inputs[col] = [vec_meas*np.sqrt(np.maximum(val, 0))] * len(df_inputs)
-
-    # Per-event projections onto CM eigenmodes, shape (nevt, k)
-    cm_mat = df[cm_columns].to_numpy(dtype=np.float32)
-    U_cm = vec_components_cm[[f"eigvec_{i}" for i in range(k)]].to_numpy(dtype=np.float32)
-    proj_cm = cm_mat @ U_cm
-    for i in range(k):
-        df_inputs[f"cm_proj_eigvec_{i}"] = proj_cm[:, i]
 
     # # number of channels with toa and with tot
     df_inputs[f"nchtoa"] = df["nchtoa"]
@@ -168,6 +177,13 @@ def prepare_dnn_inputs(cfg, column_tag, inferencer, nch_to_use=None):
     target_columns = [f"adc_ch{idx:03}_pedsub{column_tag}" for idx in adc_channel_indices]
     event_ids_all = []
 
+    def write_df(df: pd.DataFrame, filename: str, index: bool = True) -> None:
+        utils.write_via_tmpdir(
+            outfilename=os.path.join(cfg.dnn_training_input_folder, filename),
+            suffix=".parquet",
+            writer_fn=lambda tmp, data=df, use_index=index: data.to_parquet(tmp, engine="pyarrow", index=use_index, compression="zstd"),
+        )
+
     for idx, df_chunk in enumerate(inferencer.full_df_iter()):
         df_targets = df_chunk[target_columns].copy().astype("float32")
         df_inputs  = make_input_df(cfg=cfg, df=df_chunk, adc_channel_indices=adc_channel_indices, column_tag=column_tag)
@@ -176,8 +192,8 @@ def prepare_dnn_inputs(cfg, column_tag, inferencer, nch_to_use=None):
         print(df_inputs)
 
         # write input and target chunks
-        df_targets.to_parquet(os.path.join(cfg.dnn_training_input_folder, f"targets_chunk{idx:03d}.parquet"), engine="pyarrow", index=True, compression="zstd")
-        df_inputs.to_parquet(os.path.join(cfg.dnn_training_input_folder, f"inputs_chunk{idx:03d}.parquet"), engine="pyarrow", index=True, compression="zstd")
+        write_df(df_targets, f"targets_chunk{idx:03d}.parquet")
+        write_df(df_inputs, f"inputs_chunk{idx:03d}.parquet")
         event_ids_all.append(df_chunk.index.to_numpy(np.int64))
 
     event_ids = np.unique(np.concatenate(event_ids_all))
@@ -193,7 +209,7 @@ def prepare_dnn_inputs(cfg, column_tag, inferencer, nch_to_use=None):
             "split": np.where(np.isin(event_ids, test_ids), "test", "train"),
         }
     )
-    df_split.to_parquet(os.path.join(cfg.dnn_training_input_folder, "event_split_train_test.parquet"), index=False, compression="zstd")
+    write_df(df_split, "event_split_train_test.parquet", index=False)
     print(df_split)
 
     print(f"--> Wrote input, target, and split DFs to: {cfg.dnn_training_input_folder}")

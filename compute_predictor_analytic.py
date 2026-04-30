@@ -38,6 +38,12 @@ def main():
         ],
         help="List of module names to compute covariances for.",
     )
+    parser.add_argument(
+        "--selection-for-correction",
+        type=str,
+        default="",
+        help="Optional selection tag encoded in the correction-artifact folder.",
+    )
     args = parser.parse_args()
 
 
@@ -48,6 +54,8 @@ def main():
             run_for_pedestal=args.pedestal_run,
             run_for_correction=args.pedestal_run,
             module_for_correction=x,
+            derive_correction=True,
+            selection_for_correction=args.selection_for_correction,
             standardize_std = False,
             inputfoldertag = "",
         )
@@ -60,8 +68,11 @@ def main():
 
 def compute_predictor_analytic(cfg) -> None:
     print("Hello from compute_predictor_analytic()!")
-    if not cfg.is_pedestal:
-        raise ValueError(f"Trying to compute analytic predictor from non-pedestal run {cfg.run}! Usually, one wants to use a pedestal run to compute a predictor. If you are *really* sure this is what you want, comment this error out.")
+    if not cfg.derive_correction:
+        raise ValueError(
+            "Trying to compute an analytic predictor with cfg.derive_correction=False. "
+            "Set derive_correction=True for configs that are meant to produce correction artifacts."
+        )
 
     # Load covs
     sigma_cc_df = cfg.load_from_cov_folder(filename="sigma_cc.parquet")
@@ -75,9 +86,16 @@ def compute_predictor_analytic(cfg) -> None:
     # compute W
     W = pd.DataFrame(sigma_mc_df.values @ np.linalg.inv(sigma_cc_df.values), index=sigma_mc_df.index, columns=sigma_cc_df.index)
 
+    def write_df(df: pd.DataFrame, filename: str) -> None:
+        utils.write_via_tmpdir(
+            outfilename=os.path.join(cfg.analytic_predictor_folder, filename),
+            suffix=".parquet",
+            writer_fn=lambda tmp, data=df: data.to_parquet(tmp, index=True, compression="zstd"),
+        )
+
     # Write to file
     os.makedirs(cfg.analytic_predictor_folder, exist_ok=True)
-    W.to_parquet(os.path.join(cfg.analytic_predictor_folder, "analytic_k0.parquet"), index=True, compression="zstd")
+    write_df(W, "analytic_k0.parquet")
     print(f"Wrote analytic (k=0) predictor matrix W to folder: {cfg.analytic_predictor_folder}")
 
 
@@ -102,7 +120,7 @@ def compute_predictor_analytic(cfg) -> None:
 
     # Write to file
     os.makedirs(cfg.analytic_predictor_folder, exist_ok=True)
-    W_outfull.to_parquet(os.path.join(cfg.analytic_predictor_folder, "analytic_with_unconnected_k0.parquet"), index=True, compression="zstd")
+    write_df(W_outfull, "analytic_with_unconnected_k0.parquet")
     print(f"Wrote analytic (k=0) predictor matrix W using CMs and unconnected channels to folder: {cfg.analytic_predictor_folder}")
 
 
