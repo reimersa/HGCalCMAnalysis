@@ -1,4 +1,4 @@
-#! /eos/user/a/areimers/torch-env/bin/python
+#!/usr/bin/env python3
 
 import warnings
 warnings.filterwarnings("ignore", message="The value of the smallest subnormal.*")
@@ -157,6 +157,23 @@ def iter_analysis_df_chunks(cfg, nevt_per_batch=100000, keepall=True, adcmax=Non
 
         adc_cols = [f"adc_ch{i:03d}_pedsub" for i in range(cfg.nch)]
         df_chunk["adc_sum_allchannels_pedsub"] = df_chunk[adc_cols].sum(axis=1, skipna=True)
+        df_chunk["nchadcgt10"] = (df_chunk[adc_cols] > 10).sum(axis=1)
+        df_chunk["nchadcgt50"] = (df_chunk[adc_cols] > 50).sum(axis=1)
+        df_chunk["nchadcgt200"] = (df_chunk[adc_cols] > 200).sum(axis=1)
+        df_chunk["nchadcgt500"] = (df_chunk[adc_cols] > 500).sum(axis=1)
+        for erx in range(cfg.nerx):
+            ch_start = cfg.nch_per_erx * erx
+            ch_stop = cfg.nch_per_erx * (erx + 1)
+            adc_cols_erx = [f"adc_ch{chidx:03d}_pedsub" for chidx in range(ch_start, ch_stop)]
+            toa_cols_erx = [f"toa_ch{chidx:03d}" for chidx in range(ch_start, ch_stop)]
+            tot_cols_erx = [f"tot_ch{chidx:03d}" for chidx in range(ch_start, ch_stop)]
+
+            df_chunk[f"erx{erx:02d}_nchtoa"] = df_chunk[toa_cols_erx].notna().sum(axis=1).astype(int)
+            df_chunk[f"erx{erx:02d}_nchtot"] = df_chunk[tot_cols_erx].notna().sum(axis=1).astype(int)
+            df_chunk[f"erx{erx:02d}_nchadcgt10"] = (df_chunk[adc_cols_erx] > 10).sum(axis=1).astype(int)
+            df_chunk[f"erx{erx:02d}_nchadcgt50"] = (df_chunk[adc_cols_erx] > 50).sum(axis=1).astype(int)
+            df_chunk[f"erx{erx:02d}_nchadcgt200"] = (df_chunk[adc_cols_erx] > 200).sum(axis=1).astype(int)
+            df_chunk[f"erx{erx:02d}_nchadcgt500"] = (df_chunk[adc_cols_erx] > 500).sum(axis=1).astype(int)
 
         if not keepall:
             rings_to_keep = cfg.channel_rings_to_keep_per_run[cfg.run]
@@ -293,6 +310,26 @@ def apply_mean_std(df, nch, scalar_means, per_channel_means, scalar_stds=None, p
             unit_vals = (pedsub_vals / std_arr[np.newaxis, :]).astype("float32")
             unit_cols = [f"{x}_pedsub_unitstd" for x in cols_expanded]
             new_cols_vector.append(pd.DataFrame(unit_vals, columns=unit_cols, index=df.index))
+
+    adc_mu = per_channel_means.get("adc")
+    if adc_mu is not None:
+        adc_mu_arr = np.asarray(adc_mu, dtype=np.float32)
+        if len(adc_mu_arr) != nch:
+            raise ValueError(f"Length mismatch for per-channel means of column 'adc': expected {nch}, got {len(adc_mu_arr)}")
+
+        adcm1_cols = [f"adcm1_ch{ch:03d}" for ch in range(nch)]
+        if not [c for c in adcm1_cols if c not in df.columns]:
+            adcm1_base = df[adcm1_cols].to_numpy(dtype=np.float32)
+            adcm1_pedsub_vals = (adcm1_base - adc_mu_arr[np.newaxis, :]).astype("float32")
+            adcm1_pedsub_cols = [f"{x}_pedsub" for x in adcm1_cols]
+            new_cols_vector.append(pd.DataFrame(adcm1_pedsub_vals, columns=adcm1_pedsub_cols, index=df.index))
+
+            if standardize_std and per_channel_stds is not None and "adc" in per_channel_stds:
+                adc_std_arr = np.asarray(per_channel_stds["adc"], dtype=np.float32)
+                adc_std_arr = np.where(adc_std_arr > 1e-12, adc_std_arr, 1.0)
+                adcm1_unit_vals = (adcm1_pedsub_vals / adc_std_arr[np.newaxis, :]).astype("float32")
+                adcm1_unit_cols = [f"{x}_pedsub_unitstd" for x in adcm1_cols]
+                new_cols_vector.append(pd.DataFrame(adcm1_unit_vals, columns=adcm1_unit_cols, index=df.index))
     if new_cols_vector:
 
         cols_to_add = []

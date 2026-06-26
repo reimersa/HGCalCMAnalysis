@@ -1,4 +1,5 @@
 import os
+import pwd
 import re
 from glob import glob
 import numpy as np # type: ignore
@@ -101,6 +102,7 @@ class AnalysisConfig:
     unconnected_channels: Optional[list[int]] = None
 
     # folders, all set internally for consistency
+    raw_datafolder_base: str = None
     datafolder_base: str = None
     histofiller_folder: str = None
     analysis_inputs_folder: str = None
@@ -109,6 +111,8 @@ class AnalysisConfig:
     own_covs_folder: str = None
     noise_model_fit_folder: str = None
     analytic_predictor_folder: str = None
+    dnn_models_folder: str = None
+    dnn_training_input_folder: str = None
     plotfolder_base: str = None
 
 
@@ -117,7 +121,9 @@ class AnalysisConfig:
         self.infer_layout()
         correction_subfolder = self.get_correction_subfolder()
 
-        self.datafolder_base                 = "/eos/user/a/areimers/hgcal/Sep2025TB"
+        username = pwd.getpwuid(os.getuid()).pw_name
+        self.raw_datafolder_base             = "/eos/user/a/areimers/hgcal/Sep2025TB"
+        self.datafolder_base                 = f"/eos/user/{username[0]}/{username}/hgcal/Sep2025TB"
         self.histofiller_folder              = self.get_histofiller_folder()
         self.analysis_inputs_folder          = os.path.join(self.datafolder_base, f"Run{self.run}/analysis_inputs{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}", correction_subfolder)
         self.pedestal_mean_std_folder        = os.path.join(self.datafolder_base, f"Run{self.run_for_pedestal}/means_stds{self.inputfoldertag}/{self.modulename}")
@@ -133,17 +139,24 @@ class AnalysisConfig:
         self.is_pedestal = is_pedestal_run(self.run)
 
         self.runs_per_synthetic_run = {
+            "112046_adcmax10": [112046],
+            "112047_adcmax10": [112047],
+            "112048_adcmax10": [112048],
+            "112049_adcmax10": [112049],
             "112050_adcmax50": [112050],
             "112050_adcmax10": [112050],
+            "112060_adcmax10": [112060],
             "112051_adcmax10": [112051],
             "112044_112050": [112044, 112050],
             "112044_112050_full": [112044, 112050],
             "112073_outer": [112073],
             "112060_outer": [112060],
             "112068_adcmax10": [112068],
+            "112044_112050_112060_112073_adcmax5": [112044, 112050, 112060, 112073],
             "112044_112050_112060_112073_adcmax10": [112044, 112050, 112060, 112073],
             "112044_112050_112060_112073_adcmax30": [112044, 112050, 112060, 112073],
             "112050_112060_112073_adcmax10": [112050, 112060, 112073],
+            "112046_112047_112048_112049_112050_adcmax10": [112046, 112047, 112048, 112049, 112050],
         }
 
         self.runs_to_select_rings_for = ["112044_112050", "112073_outer", "112060_outer"]
@@ -158,13 +171,20 @@ class AnalysisConfig:
         }
 
         self.adcmax_per_run = {
+            "112046_adcmax10": 10,
+            "112047_adcmax10": 10,
+            "112048_adcmax10": 10,
+            "112049_adcmax10": 10,
             "112050_adcmax50": 50,
             "112050_adcmax10": 10,
+            "112060_adcmax10": 10,
             "112051_adcmax10": 10,
             "112068_adcmax10": 10,
+            "112044_112050_112060_112073_adcmax5": 5,
             "112044_112050_112060_112073_adcmax10": 10,
             "112044_112050_112060_112073_adcmax30": 30,
             "112050_112060_112073_adcmax10": 10,
+            "112046_112047_112048_112049_112050_adcmax10": 10,
         }
         self.adcmax = None
         if self.run in self.adcmax_per_run.keys():
@@ -183,7 +203,7 @@ class AnalysisConfig:
         )
 
     def get_histofiller_folder(self):
-        return os.path.join(self.datafolder_base, f"output/Run{self.run}/histofiller")
+        return os.path.join(self.raw_datafolder_base, f"output/Run{self.run}/histofiller")
 
     def _sanitize_correction_tag(self, value: str) -> str:
         cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value).strip())
@@ -304,10 +324,11 @@ class CovAccumulator:
 
 
 class DNNBatch:
-    def __init__(self, cfg, df_inputs: pd.DataFrame, df_targets: pd.DataFrame):
+    def __init__(self, cfg, df_inputs: pd.DataFrame, df_targets: pd.DataFrame, df_weights: Optional[pd.DataFrame] = None):
         self.cfg = cfg
         self.df_inputs = df_inputs
         self.df_targets = df_targets
+        self.df_weights = df_weights
 
     @property
     def full_inputs_df(self) -> pd.DataFrame:
@@ -318,21 +339,35 @@ class DNNBatch:
         return self.df_targets
 
 class DNNBatchIter:
-    def __init__(self, cfg):
+    def __init__(self, cfg, require_weights: bool = False):
         self.cfg = cfg
+        self.require_weights = require_weights
         base = cfg.dnn_training_input_folder
 
         self.inputfiles   = sorted(glob(os.path.join(base, "inputs_chunk*.parquet")))
         self.targetfiles  = sorted(glob(os.path.join(base, "targets_chunk*.parquet")))
+        self.weightfiles  = sorted(glob(os.path.join(base, "weights_chunk*.parquet")))
 
         if not self.inputfiles:
             raise RuntimeError(f"No DNN input chunks found in {base} (inputs_chunk*.parquet)")
         if not (len(self.inputfiles) == len(self.targetfiles)):
             raise RuntimeError(f"Mismatch chunk counts in {base}: inputs={len(self.inputfiles)} targets={len(self.targetfiles)}")
+        if self.require_weights and len(self.weightfiles) != len(self.inputfiles):
+            raise RuntimeError(
+                f"Requested DNN sample weights, but found inputs={len(self.inputfiles)} and weights={len(self.weightfiles)} in {base}. "
+                "Rerun prepare_dnn_inputs.py to create weights_chunk*.parquet sidecars."
+            )
 
     def __iter__(self):
-        for fin, ftg in zip(self.inputfiles, self.targetfiles):
+        for idx, (fin, ftg) in enumerate(zip(self.inputfiles, self.targetfiles)):
             df_inputs  = pd.read_parquet(fin)
             df_targets = pd.read_parquet(ftg)
+            df_weights = None
+            if self.require_weights:
+                df_weights = pd.read_parquet(self.weightfiles[idx])
+                if df_weights.shape != df_targets.shape:
+                    raise ValueError(f"DNN weight shape mismatch for {self.weightfiles[idx]}: weights={df_weights.shape}, targets={df_targets.shape}")
+                if not df_weights.index.equals(df_targets.index) or list(df_weights.columns) != list(df_targets.columns):
+                    raise ValueError(f"DNN weights in {self.weightfiles[idx]} do not match target index/columns.")
 
-            yield DNNBatch(cfg=self.cfg, df_inputs=df_inputs, df_targets=df_targets) 
+            yield DNNBatch(cfg=self.cfg, df_inputs=df_inputs, df_targets=df_targets, df_weights=df_weights) 

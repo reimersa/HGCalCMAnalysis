@@ -1,4 +1,4 @@
-#! /eos/user/a/areimers/torch-env/bin/python
+#!/usr/bin/env python3
 
 import warnings
 warnings.filterwarnings("ignore", message="The value of the smallest subnormal.*")
@@ -63,7 +63,7 @@ def main() -> None:
         "--column-tag",
         type=str,
         default="",
-        help="Column tag to be appended at the end of 'adc_ch{i:03d}_pedsub'. E.g.: '_pred_analytic_k0' when APPLYING the noisemode subtraction",
+        help="Column tag to be appended at the end of 'adc_ch{i:03d}_pedsub'.",
     )
 
     args = parser.parse_args()
@@ -94,7 +94,7 @@ def main() -> None:
 def _load_cell_area_fractions(cfg, adc_channel_indices):
     module_type = cfg.modulename[:4].replace("-", "_")
     cellareas_path = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "data", "cellareas.json")
+        os.path.join(os.path.dirname(__file__), "data", "cellareas.json")
     )
 
     with open(cellareas_path, "r", encoding="utf-8") as handle:
@@ -119,6 +119,12 @@ def make_input_df(cfg, df, adc_channel_indices, column_tag):
 
     cm_columns = [f"cm_erx{idx:02}_pedsub" for idx in range(cfg.ncmchannels)]
     df_inputs = df[cm_columns].copy().astype("float32")
+    if "source_run" in df.columns:
+        df_inputs["source_run"] = df["source_run"]
+    else:
+        df_inputs["source_run"] = cfg.run
+    if "source_is_pedestal" in df.columns:
+        df_inputs["source_is_pedestal"] = df["source_is_pedestal"]
 # 
     adc_channel_indices_mean = sum(adc_channel_indices) / len(adc_channel_indices)
 
@@ -136,7 +142,7 @@ def make_input_df(cfg, df, adc_channel_indices, column_tag):
     df_inputs["cell_area_fraction"] = [cell_area_fractions.tolist()] * len(df_inputs)
 
     # unconnected channels on the same e-Rx as the channel
-    def _build_unconnected_feature(offset: int, out_col: str) -> None:
+    def _build_unconnected_feature(offset: int, out_col: str) -> np.ndarray:
         src_cols = [f"adc_ch{(x * cfg.nch_per_erx + offset):03d}_pedsub{column_tag}" for x in erx_indices]
         arr = df[src_cols].to_numpy(dtype=np.float32, copy=True)
         bad = ~np.isfinite(arr)
@@ -149,15 +155,22 @@ def make_input_df(cfg, df, adc_channel_indices, column_tag):
             )
             arr[bad] = np.float32(0.)
         df_inputs[out_col] = arr.tolist()
+        return arr
 
-    _build_unconnected_feature(offset=8, out_col="adc_unconnected_00")
-    _build_unconnected_feature(offset=17, out_col="adc_unconnected_01")
-    _build_unconnected_feature(offset=19, out_col="adc_unconnected_02")
-    _build_unconnected_feature(offset=28, out_col="adc_unconnected_03")
+    unconn_arrays = [
+        _build_unconnected_feature(offset=8, out_col="adc_unconnected_00"),
+        _build_unconnected_feature(offset=17, out_col="adc_unconnected_01"),
+        _build_unconnected_feature(offset=19, out_col="adc_unconnected_02"),
+        _build_unconnected_feature(offset=28, out_col="adc_unconnected_03"),
+    ]
 
     # # number of channels with toa and with tot
     df_inputs[f"nchtoa"] = df["nchtoa"]
     df_inputs[f"nchtot"] = df["nchtot"]
+    df_inputs["nchadcgt10"] = df["nchadcgt10"]
+    df_inputs["nchadcgt50"] = df["nchadcgt50"]
+    df_inputs["nchadcgt200"] = df["nchadcgt200"]
+    df_inputs["nchadcgt500"] = df["nchadcgt500"]
     
     return df_inputs
 
@@ -176,6 +189,7 @@ def prepare_dnn_inputs(cfg, column_tag, inferencer, nch_to_use=None):
     adc_channel_indices = [x for x in range(nch_to_use)]
     target_columns = [f"adc_ch{idx:03}_pedsub{column_tag}" for idx in adc_channel_indices]
     event_ids_all = []
+    chunk_indices = []
 
     def write_df(df: pd.DataFrame, filename: str, index: bool = True) -> None:
         utils.write_via_tmpdir(
@@ -195,6 +209,7 @@ def prepare_dnn_inputs(cfg, column_tag, inferencer, nch_to_use=None):
         write_df(df_targets, f"targets_chunk{idx:03d}.parquet")
         write_df(df_inputs, f"inputs_chunk{idx:03d}.parquet")
         event_ids_all.append(df_chunk.index.to_numpy(np.int64))
+        chunk_indices.append(idx)
 
     event_ids = np.unique(np.concatenate(event_ids_all))
     rng_split = np.random.default_rng(6789)
@@ -211,9 +226,124 @@ def prepare_dnn_inputs(cfg, column_tag, inferencer, nch_to_use=None):
     )
     write_df(df_split, "event_split_train_test.parquet", index=False)
     print(df_split)
+    write_source_run_channel_weights(
+        cfg=cfg,
+        chunk_indices=chunk_indices,
+        target_columns=target_columns,
+        split_map=dict(zip(df_split["event_id_global"].to_numpy(np.int64), df_split["split"].astype(str).to_numpy())),
+    )
 
     print(f"--> Wrote input, target, and split DFs to: {cfg.dnn_training_input_folder}")
 
+
+def write_source_run_channel_weights(cfg, chunk_indices, target_columns, split_map):
+    counts = {"train": {}, "test": {}}
+
+    for idx in chunk_indices:
+        inputs_path = os.path.join(cfg.dnn_training_input_folder, f"inputs_chunk{idx:03d}.parquet")
+        targets_path = os.path.join(cfg.dnn_training_input_folder, f"targets_chunk{idx:03d}.parquet")
+        df_inputs = pd.read_parquet(inputs_path)
+        df_targets = pd.read_parquet(targets_path)
+        if "source_run" not in df_inputs.columns:
+            raise KeyError(f"Missing source_run in {inputs_path}; rerun DNN input preparation.")
+        if list(df_targets.columns) != list(target_columns):
+            raise ValueError(f"Unexpected target columns in {targets_path}.")
+
+        source_runs = df_inputs["source_run"].to_numpy()
+        splits = pd.Index(df_inputs.index.to_numpy(np.int64, copy=False)).map(split_map).to_numpy()
+        if not np.all(np.isin(splits, ["train", "test"])):
+            bad = df_inputs.index.to_numpy(np.int64, copy=False)[~np.isin(splits, ["train", "test"])]
+            raise KeyError(f"Unknown split label while computing weights for events (showing up to 10): {bad[:10]}")
+        targets = df_targets.to_numpy(np.float32, copy=False)
+        valid = np.isfinite(targets)
+
+        for split in ("train", "test"):
+            rows_split = np.flatnonzero(splits == split)
+            if rows_split.size == 0:
+                continue
+            for source_run in np.unique(source_runs[rows_split]):
+                rows = rows_split[source_runs[rows_split] == source_run]
+                count = valid[rows].sum(axis=0, dtype=np.int64)
+                counts[split].setdefault(source_run, np.zeros(len(target_columns), dtype=np.int64))
+                counts[split][source_run] += count
+
+    norm_by_split = {}
+    for split in ("train", "test"):
+        n_valid = 0
+        raw_sum = 0.0
+        for count in counts[split].values():
+            positive = count > 0
+            n_valid += int(count[positive].sum())
+            raw_sum += float(np.count_nonzero(positive))
+        if n_valid == 0:
+            raise RuntimeError(f"No valid targets found for split '{split}' while computing DNN weights.")
+        norm_by_split[split] = raw_sum / float(n_valid)
+
+    stats = {
+        "train": {"n_valid": 0, "n_positive_weight": 0, "sum_weight": 0.0, "min": np.inf, "max": 0.0},
+        "test": {"n_valid": 0, "n_positive_weight": 0, "sum_weight": 0.0, "min": np.inf, "max": 0.0},
+    }
+
+    for idx in chunk_indices:
+        inputs_path = os.path.join(cfg.dnn_training_input_folder, f"inputs_chunk{idx:03d}.parquet")
+        targets_path = os.path.join(cfg.dnn_training_input_folder, f"targets_chunk{idx:03d}.parquet")
+        df_inputs = pd.read_parquet(inputs_path)
+        df_targets = pd.read_parquet(targets_path)
+
+        source_runs = df_inputs["source_run"].to_numpy()
+        splits = pd.Index(df_inputs.index.to_numpy(np.int64, copy=False)).map(split_map).to_numpy()
+        if not np.all(np.isin(splits, ["train", "test"])):
+            bad = df_inputs.index.to_numpy(np.int64, copy=False)[~np.isin(splits, ["train", "test"])]
+            raise KeyError(f"Unknown split label while writing weights for events (showing up to 10): {bad[:10]}")
+        targets = df_targets.to_numpy(np.float32, copy=False)
+        valid = np.isfinite(targets)
+        weights = np.zeros(targets.shape, dtype=np.float32)
+
+        for split in ("train", "test"):
+            rows_split = np.flatnonzero(splits == split)
+            if rows_split.size == 0:
+                continue
+            norm = norm_by_split[split]
+            for source_run in np.unique(source_runs[rows_split]):
+                rows = rows_split[source_runs[rows_split] == source_run]
+                count = counts[split].get(source_run)
+                if count is None:
+                    raise RuntimeError(f"Missing count table for split={split}, source_run={source_run}.")
+                valid_rows = valid[rows]
+                missing = valid_rows & (count[None, :] <= 0)
+                if np.any(missing):
+                    raise RuntimeError(f"Valid target mapped to zero count for split={split}, source_run={source_run}.")
+                row_weights = np.zeros(valid_rows.shape, dtype=np.float32)
+                count_rows = np.broadcast_to(count[None, :], valid_rows.shape)
+                row_weights[valid_rows] = (1.0 / count_rows[valid_rows]) / norm
+                weights[rows] = row_weights
+
+            valid_split = valid[rows_split]
+            positive_split = weights[rows_split] > 0.0
+            stats[split]["n_valid"] += int(np.count_nonzero(valid_split))
+            stats[split]["n_positive_weight"] += int(np.count_nonzero(positive_split))
+            if np.any(positive_split):
+                positive_weights = weights[rows_split][positive_split]
+                stats[split]["sum_weight"] += float(positive_weights.sum(dtype=np.float64))
+                stats[split]["min"] = min(stats[split]["min"], float(positive_weights.min()))
+                stats[split]["max"] = max(stats[split]["max"], float(positive_weights.max()))
+
+        df_weights = pd.DataFrame(weights, index=df_targets.index, columns=df_targets.columns)
+        utils.write_via_tmpdir(
+            outfilename=os.path.join(cfg.dnn_training_input_folder, f"weights_chunk{idx:03d}.parquet"),
+            suffix=".parquet",
+            writer_fn=lambda tmp, data=df_weights: data.to_parquet(tmp, engine="pyarrow", index=True, compression="zstd"),
+        )
+
+    for split in ("train", "test"):
+        n_valid = stats[split]["n_valid"]
+        n_positive = stats[split]["n_positive_weight"]
+        mean_weight = stats[split]["sum_weight"] / max(1, n_positive)
+        print(
+            f"DNN source_run_channel weights ({split}): "
+            f"valid_targets={n_valid}, positive_weights={n_positive}, "
+            f"mean={mean_weight:.6g}, min={stats[split]['min'] if np.isfinite(stats[split]['min']) else 0.0:.6g}, max={stats[split]['max']:.6g}"
+        )
 
 
 

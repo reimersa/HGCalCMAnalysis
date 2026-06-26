@@ -1,4 +1,4 @@
-#! /eos/user/a/areimers/torch-env/bin/python
+#!/usr/bin/env python3
 
 import argparse
 import os

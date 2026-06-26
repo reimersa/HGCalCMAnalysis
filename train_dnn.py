@@ -1,8 +1,9 @@
-#! /eos/user/a/areimers/torch-env/bin/python
+#!/usr/bin/env python3
 
 import os
 import time
 import argparse
+import json
 import numpy as np  # type: ignore
 import torch  # type: ignore
 import torch.nn as nn # type: ignore
@@ -23,7 +24,48 @@ defaults = {
     "modeltag": "",
     "batch_samples": 8192,   # number of (ev,ch) samples per optimizer step
     "max_steps_per_epoch": None,  # optionally cap steps/epoch for quick tests
+    "shuffle_mode": "chunk_events",
+    "shuffle_buffer_samples": 200_000,
+    "shuffle_buffer_chunks": 4,
+    "exclude_unconnected_targets": False,
+    "weight_decay": 0.0,
+    "sample_weighting": "none",
+    "preprocess_inputs": False,
 }
+
+INPUT_PREPROCESSING_TAG = "inputzscore"
+INPUT_PREPROCESSING_FILENAME = "input_preprocessing.json"
+
+
+def parse_run_arg(value: str):
+    return int(value) if str(value).isdigit() else value
+
+
+def format_weight_decay_tag(weight_decay: float) -> str:
+    value = f"{weight_decay:g}"
+    if "e" in value:
+        mantissa, exponent = value.split("e")
+        exp = int(exponent)
+        exp_tag = f"{'p' if exp >= 0 else 'm'}{abs(exp)}"
+        return f"weightdecay{mantissa.replace('.', 'p')}e{exp_tag}"
+    return f"weightdecay{value.replace('.', 'p')}"
+
+
+def tag_with_weight_decay(tag: str, weight_decay: float) -> str:
+    if weight_decay == 0.0:
+        return tag
+    if "weightdecay" in tag:
+        return tag
+    weight_decay_tag = format_weight_decay_tag(weight_decay)
+    return f"{tag}_{weight_decay_tag}" if tag else weight_decay_tag
+
+
+def tag_with_input_preprocessing(tag: str, preprocess_inputs: bool) -> str:
+    if not preprocess_inputs:
+        return tag
+    if INPUT_PREPROCESSING_TAG in tag.split("_"):
+        return tag
+    return f"{tag}_{INPUT_PREPROCESSING_TAG}" if tag else INPUT_PREPROCESSING_TAG
 
 
 def main():
@@ -33,12 +75,42 @@ def main():
     p.add_argument("-d", "--dropout", type=float, default=defaults["dropout_rate"])
     p.add_argument("-e", "--epochs", type=int, default=defaults["max_epochs"])
     p.add_argument("-t", "--tag", type=str, default=defaults["modeltag"])
+    p.add_argument("--weight-decay", type=float, default=defaults["weight_decay"])
+    p.add_argument(
+        "--sample-weighting",
+        choices=["none", "source_run_channel"],
+        default=defaults["sample_weighting"],
+        help="Optional per-sample DNN loss weighting.",
+    )
 
     p.add_argument("-m", "--modules", nargs="+", metavar="MOD", default=defaults["modules_for_training"])
-    p.add_argument("--run", type=int, default=112044)
+    p.add_argument("--run", type=parse_run_arg, default=112044)
     p.add_argument("--pedestal-run", type=int, default=112044)
 
     p.add_argument("--batch-samples", type=int, default=defaults["batch_samples"])
+    p.add_argument(
+        "--shuffle-mode",
+        choices=["chunk_events", "buffered_chunk_events", "global_samples"],
+        default=defaults["shuffle_mode"],
+        help="DNN training sample shuffling: chunk-local events, buffered multi-chunk events, or streaming global (event,channel) samples.",
+    )
+    p.add_argument(
+        "--shuffle-buffer-samples",
+        type=int,
+        default=defaults["shuffle_buffer_samples"],
+        help="Maximum number of flattened (event,channel) samples to mix for --shuffle-mode global_samples.",
+    )
+    p.add_argument(
+        "--shuffle-buffer-chunks",
+        type=int,
+        default=defaults["shuffle_buffer_chunks"],
+        help="Number of parquet chunks to load and event-shuffle together for --shuffle-mode buffered_chunk_events.",
+    )
+    p.add_argument(
+        "--exclude-unconnected-targets",
+        action="store_true",
+        help="Exclude unconnected channels from supervised DNN train/test targets.",
+    )
     p.add_argument(
         "--selection-for-correction",
         type=str,
@@ -49,6 +121,12 @@ def main():
     p.add_argument("--noprogbar", action="store_true")
     p.add_argument("--override-name", action="store_true")
     p.add_argument("--new-name", type=str, default="TESTTEST")
+    p.add_argument(
+        "--preprocess-inputs",
+        action="store_true",
+        default=defaults["preprocess_inputs"],
+        help="Z-score DNN input features and per-channel targets using train-split statistics.",
+    )
 
     # tell inferencer which columns are per-channel list-columns
     p.add_argument(
@@ -73,20 +151,32 @@ def main():
     ]
 
     for cfg in cfgs:
-        train_dnn(cfg=cfg, noprogbar=args.noprogbar, per_channel_cols=args.per_channel_cols, nodes=args.nodes, dropout=args.dropout, tag=args.tag, override_name=args.override_name, new_name=args.new_name, batch_samples=args.batch_samples, epochs=args.epochs)
+        train_dnn(cfg=cfg, noprogbar=args.noprogbar, per_channel_cols=args.per_channel_cols, nodes=args.nodes, dropout=args.dropout, tag=args.tag, override_name=args.override_name, new_name=args.new_name, batch_samples=args.batch_samples, epochs=args.epochs, shuffle_mode=args.shuffle_mode, shuffle_buffer_samples=args.shuffle_buffer_samples, shuffle_buffer_chunks=args.shuffle_buffer_chunks, exclude_unconnected_targets=args.exclude_unconnected_targets, weight_decay=args.weight_decay, sample_weighting=args.sample_weighting, preprocess_inputs=args.preprocess_inputs)
 
 
 
 
-def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_samples, epochs, override_name=False, new_name="TESTTEST") -> None:
+def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_samples, epochs, override_name=False, new_name="TESTTEST", shuffle_mode: str = defaults["shuffle_mode"], shuffle_buffer_samples: int = defaults["shuffle_buffer_samples"], shuffle_buffer_chunks: int = defaults["shuffle_buffer_chunks"], exclude_unconnected_targets: bool = defaults["exclude_unconnected_targets"], weight_decay: float = defaults["weight_decay"], sample_weighting: str = defaults["sample_weighting"], preprocess_inputs: bool = defaults["preprocess_inputs"]) -> None:
+    if sample_weighting not in ("none", "source_run_channel"):
+        raise ValueError("sample_weighting must be 'none' or 'source_run_channel'.")
     show_progbar = not noprogbar
+    tag = tag_with_input_preprocessing(tag, preprocess_inputs)
+    tag = tag_with_weight_decay(tag, weight_decay)
+    use_sample_weights = sample_weighting != "none"
 
     # Device and split-specific data streams.
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    print(f"DNN training shuffle_mode={shuffle_mode}, shuffle_buffer_samples={shuffle_buffer_samples}, shuffle_buffer_chunks={shuffle_buffer_chunks}")
+    print(f"DNN training weight_decay={weight_decay}, tag={tag}")
+    print(f"DNN training sample_weighting={sample_weighting}")
+    print(f"DNN training preprocess_inputs={preprocess_inputs}")
+    exclude_target_channels = cfg.unconnected_channels if exclude_unconnected_targets else None
+    if exclude_target_channels:
+        print(f"Excluding {len(exclude_target_channels)} unconnected channel(s) from DNN train/test targets.")
 
-    train_inferencer = inferencers.AnalysisDNNInferencer(cfg=cfg, split="train", per_channel_cols=per_channel_cols)
-    test_inferencer  = inferencers.AnalysisDNNInferencer(cfg=cfg, split="test", per_channel_cols=per_channel_cols)
+    train_inferencer = inferencers.AnalysisDNNInferencer(cfg=cfg, split="train", per_channel_cols=per_channel_cols, require_weights=use_sample_weights)
+    test_inferencer  = inferencers.AnalysisDNNInferencer(cfg=cfg, split="test", per_channel_cols=per_channel_cols, require_weights=use_sample_weights)
 
     # Probe one batch to determine the model input shape.
     input_dim, feature_names = infer_input_dim_and_feature_names(
@@ -95,6 +185,17 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
         per_channel_cols=per_channel_cols,
     )
     print(f"Detected input_dim = {input_dim}")
+
+    input_preprocessing = None
+    if preprocess_inputs:
+        input_preprocessing = compute_input_preprocessing_stats(
+            train_inferencer=train_inferencer,
+            batch_samples=batch_samples,
+            feature_names=feature_names,
+            shuffle_mode=shuffle_mode,
+            shuffle_buffer_samples=shuffle_buffer_samples,
+            shuffle_buffer_chunks=shuffle_buffer_chunks,
+        )
     
     model = build_model(
         input_dim=input_dim,
@@ -112,15 +213,23 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
     modelfolder = os.path.join(cfg.dnn_models_folder, model.get_model_string())
     os.makedirs(modelfolder, exist_ok=False)
     print(f"Writing outputs to: {modelfolder}")
+    if input_preprocessing is not None:
+        save_input_preprocessing(modelfolder=modelfolder, input_preprocessing=input_preprocessing)
 
     # Optimizer and LR schedule.
-    optimizer = torch.optim.Adam(model.parameters(), lr=float(1e-3))
+    # optimizer = torch.optim.Adam(model.parameters(), lr=float(1e-3))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=float(1e-3), weight_decay=weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=0.5, patience=5, min_lr=1e-6)
 
     # Sample counts are only used for progress bars.
     if show_progbar:
-        n_train = count_samples(train_inferencer, nch_per_event=cfg.nch)
-        n_test = count_samples(test_inferencer, nch_per_event=cfg.nch)
+        if exclude_target_channels:
+            nch_supervised = cfg.nch - len(set(exclude_target_channels))
+            n_train = count_samples(train_inferencer, nch_per_event=nch_supervised)
+            n_test = count_samples(test_inferencer, nch_per_event=nch_supervised)
+        else:
+            n_train = count_samples(train_inferencer, nch_per_event=cfg.nch)
+            n_test = count_samples(test_inferencer, nch_per_event=cfg.nch)
         print(f"Total samples: train={n_train}, test={n_test}")
 
     train_losses: list[float] = []
@@ -144,6 +253,12 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
             feature_names=feature_names,
             show_progbar=show_progbar,
             n_total=n_train if show_progbar else None,
+            shuffle_mode=shuffle_mode,
+            shuffle_buffer_samples=shuffle_buffer_samples,
+            shuffle_buffer_chunks=shuffle_buffer_chunks,
+            exclude_target_channels=exclude_target_channels,
+            use_sample_weights=use_sample_weights,
+            input_preprocessing=input_preprocessing,
         )
         train_losses.append(train_loss)
 
@@ -155,6 +270,12 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
             batch_samples=batch_samples,
             show_progbar=show_progbar,
             n_total=n_test if show_progbar else None,
+            shuffle_mode=shuffle_mode,
+            shuffle_buffer_samples=shuffle_buffer_samples,
+            shuffle_buffer_chunks=shuffle_buffer_chunks,
+            exclude_target_channels=exclude_target_channels,
+            use_sample_weights=use_sample_weights,
+            input_preprocessing=input_preprocessing,
         )
         test_losses.append(test_loss)
 
@@ -200,7 +321,7 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
 
 
 def build_model(input_dim: int, nodes, dropout, tag, override_name=False, new_name="TESTTEST"):
-    model = dnn_models.PerChannelDNN(
+    model = dnn_models.build_per_channel_model(
         input_dim=input_dim,
         nodes_per_layer=nodes,
         dropout_rate=dropout,
@@ -233,6 +354,141 @@ def infer_input_dim_and_feature_names(train_inferencer, batch_samples, per_chann
     return input_dim, feature_names
 
 
+def compute_input_preprocessing_stats(
+    train_inferencer,
+    batch_samples: int,
+    feature_names,
+    shuffle_mode: str,
+    shuffle_buffer_samples: int,
+    shuffle_buffer_chunks: int,
+):
+    if feature_names is None:
+        raise RuntimeError("DNN input preprocessing requires stable feature names, but feature_names is None.")
+
+    n_features = len(feature_names)
+    count = np.zeros(n_features, dtype=np.int64)
+    sum_x = np.zeros(n_features, dtype=np.float64)
+    sum_x2 = np.zeros(n_features, dtype=np.float64)
+    n_target_channels = train_inferencer.cfg.nch
+    target_count = np.zeros(n_target_channels, dtype=np.int64)
+    target_sum = np.zeros(n_target_channels, dtype=np.float64)
+    target_sum2 = np.zeros(n_target_channels, dtype=np.float64)
+
+    print("Computing DNN input and target preprocessing statistics from train split...")
+    for x_np, y_np, ch_np in train_inferencer.sample_iter(
+        batch_samples=batch_samples,
+        include_targets=True,
+        epoch_seed=None,
+        shuffle_mode=shuffle_mode,
+        shuffle_buffer_samples=shuffle_buffer_samples,
+        shuffle_buffer_chunks=shuffle_buffer_chunks,
+        exclude_target_channels=None,
+        include_channel_indices=True,
+    ):
+        if x_np.shape[1] != n_features:
+            raise ValueError(f"Input preprocessing feature mismatch: got {x_np.shape[1]} columns, expected {n_features}.")
+        finite = np.isfinite(x_np)
+        x_clean = np.where(finite, x_np, 0.0).astype(np.float64, copy=False)
+        count += finite.sum(axis=0, dtype=np.int64)
+        sum_x += x_clean.sum(axis=0, dtype=np.float64)
+        sum_x2 += (x_clean * x_clean).sum(axis=0, dtype=np.float64)
+
+        finite_y = np.isfinite(y_np)
+        if np.any(finite_y):
+            ch_valid = ch_np[finite_y].astype(np.int64, copy=False)
+            y_valid = y_np[finite_y].astype(np.float64, copy=False)
+            target_count += np.bincount(ch_valid, minlength=n_target_channels)
+            target_sum += np.bincount(ch_valid, weights=y_valid, minlength=n_target_channels)
+            target_sum2 += np.bincount(ch_valid, weights=y_valid * y_valid, minlength=n_target_channels)
+
+    if np.any(count == 0):
+        missing = [feature_names[i] for i in np.flatnonzero(count == 0)[:10]]
+        raise RuntimeError(f"Cannot preprocess DNN inputs: no finite values for feature(s): {missing}")
+    if np.any(target_count == 0):
+        missing = np.flatnonzero(target_count == 0)[:10].astype(int).tolist()
+        raise RuntimeError(f"Cannot preprocess DNN targets: no finite values for target channel(s): {missing}")
+
+    mean = sum_x / count
+    var = (sum_x2 / count) - (mean * mean)
+    var = np.maximum(var, 0.0)
+    std_raw = np.sqrt(var)
+    bad_std = (~np.isfinite(std_raw)) | (std_raw <= 0.0)
+    std = std_raw.copy()
+    std[bad_std] = 1.0
+
+    target_mean = target_sum / target_count
+    target_var = (target_sum2 / target_count) - (target_mean * target_mean)
+    target_var = np.maximum(target_var, 0.0)
+    target_std_raw = np.sqrt(target_var)
+    target_bad_std = (~np.isfinite(target_std_raw)) | (target_std_raw <= 0.0)
+    target_std = target_std_raw.copy()
+    target_std[target_bad_std] = 1.0
+
+    print(
+        f"DNN input preprocessing: computed stats for {n_features} feature(s); "
+        f"zero/non-finite std replaced for {int(np.count_nonzero(bad_std))} feature(s)."
+    )
+    print(
+        f"DNN target preprocessing: computed stats for {n_target_channels} channel(s); "
+        f"zero/non-finite std replaced for {int(np.count_nonzero(target_bad_std))} channel(s)."
+    )
+
+    return {
+        "enabled": True,
+        "method": "zscore",
+        "feature_names": list(feature_names),
+        "mean": mean.astype(float).tolist(),
+        "std": std.astype(float).tolist(),
+        "zero_std_policy": "replace non-finite or non-positive std with 1.0",
+        "targets_enabled": True,
+        "target_method": "per_channel_zscore",
+        "target_channels": list(range(n_target_channels)),
+        "target_mean": target_mean.astype(float).tolist(),
+        "target_std": target_std.astype(float).tolist(),
+        "target_zero_std_policy": "replace non-finite or non-positive std with 1.0",
+    }
+
+
+def save_input_preprocessing(modelfolder: str, input_preprocessing) -> None:
+    def _write_json(path: str, payload) -> None:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+
+    utils.write_via_tmpdir(
+        outfilename=os.path.join(modelfolder, INPUT_PREPROCESSING_FILENAME),
+        suffix=".json",
+        writer_fn=lambda tmp, payload=input_preprocessing: _write_json(tmp, payload),
+    )
+    print(f"Wrote DNN input preprocessing stats to {os.path.join(modelfolder, INPUT_PREPROCESSING_FILENAME)}")
+
+
+def apply_input_preprocessing(x_np: np.ndarray, input_preprocessing) -> np.ndarray:
+    if input_preprocessing is None:
+        return x_np
+    mean = np.asarray(input_preprocessing["mean"], dtype=np.float32)
+    std = np.asarray(input_preprocessing["std"], dtype=np.float32)
+    if x_np.shape[1] != mean.shape[0] or mean.shape != std.shape:
+        raise ValueError(
+            f"Input preprocessing shape mismatch: x has {x_np.shape[1]} columns, "
+            f"mean has {mean.shape[0]}, std has {std.shape[0]}."
+        )
+    return ((x_np - mean[None, :]) / std[None, :]).astype(np.float32, copy=False)
+
+
+def apply_target_preprocessing(y_np: np.ndarray, ch_np: np.ndarray, input_preprocessing) -> np.ndarray:
+    if input_preprocessing is None:
+        return y_np
+    if not input_preprocessing.get("targets_enabled", False):
+        raise RuntimeError("Input preprocessing is enabled, but target preprocessing stats are missing.")
+    target_mean = np.asarray(input_preprocessing["target_mean"], dtype=np.float32)
+    target_std = np.asarray(input_preprocessing["target_std"], dtype=np.float32)
+    ch_np = ch_np.astype(np.int64, copy=False)
+    if np.any((ch_np < 0) | (ch_np >= target_mean.shape[0])):
+        raise ValueError("Target preprocessing received channel index outside saved target stats range.")
+    return ((y_np - target_mean[ch_np]) / target_std[ch_np]).astype(np.float32, copy=False)
+
+
 def run_train_epoch(
     model,
     inferencer,
@@ -243,6 +499,12 @@ def run_train_epoch(
     feature_names,
     show_progbar=False,
     n_total=None,
+    shuffle_mode: str = defaults["shuffle_mode"],
+    shuffle_buffer_samples: int = defaults["shuffle_buffer_samples"],
+    shuffle_buffer_chunks: int = defaults["shuffle_buffer_chunks"],
+    exclude_target_channels=None,
+    use_sample_weights: bool = False,
+    input_preprocessing=None,
 ):
     model.train()
     sum_loss = 0.0
@@ -252,9 +514,37 @@ def run_train_epoch(
     if show_progbar:
         pbar = tqdm(total=n_total, desc="Training", unit="samples", leave=False, dynamic_ncols=True)
 
-    for x_np, y_np in inferencer.sample_iter(batch_samples=batch_samples, include_targets=True, epoch_seed=epoch):
+    for batch in inferencer.sample_iter(
+        batch_samples=batch_samples,
+        include_targets=True,
+        epoch_seed=epoch,
+        shuffle_mode=shuffle_mode,
+        shuffle_buffer_samples=shuffle_buffer_samples,
+        shuffle_buffer_chunks=shuffle_buffer_chunks,
+        exclude_target_channels=exclude_target_channels,
+        include_weights=use_sample_weights,
+        include_channel_indices=input_preprocessing is not None,
+    ):
+        if use_sample_weights and input_preprocessing is not None:
+            x_np, y_np, w_np, ch_np = batch
+        elif use_sample_weights:
+            x_np, y_np, w_np = batch
+            ch_np = None
+        elif input_preprocessing is not None:
+            x_np, y_np, ch_np = batch
+            w_np = None
+        else:
+            x_np, y_np = batch
+            w_np = None
+            ch_np = None
+        x_np = apply_input_preprocessing(x_np, input_preprocessing)
+        if input_preprocessing is not None:
+            y_np = apply_target_preprocessing(y_np, ch_np, input_preprocessing)
         x = torch.from_numpy(x_np).to(device=device, dtype=torch.float32)
         y = torch.from_numpy(y_np).to(device=device, dtype=torch.float32)
+        w = None if w_np is None else torch.from_numpy(w_np).to(device=device, dtype=torch.float32)
+        if use_sample_weights and sum_count == 0:
+            print_sample_weight_stats(w=w, y=y, split="train")
 
         if not torch.isfinite(x).all():
             detail = summarize_nonfinite_tensor_2d(x, tensor_name="x", feature_names=feature_names)
@@ -262,11 +552,9 @@ def run_train_epoch(
 
         optimizer.zero_grad(set_to_none=True)
         pred = model(x)
-
         if not torch.isfinite(pred).all():
             raise RuntimeError("Non-finite prediction detected before loss.")
-
-        loss = masked_mse(pred, y)
+        loss = masked_weighted_mse(pred, y, w) if use_sample_weights else masked_mse(pred, y)
         if not torch.isfinite(loss):
             raise RuntimeError("Non-finite loss detected.")
 
@@ -291,7 +579,7 @@ def run_train_epoch(
         sum_count += 1
 
         if pbar is not None:
-            pbar.set_postfix({"batch_mse": f"{loss.item():.4f}", "steps": sum_count})
+            pbar.set_postfix({"batch_loss": f"{loss.item():.4f}", "steps": sum_count})
             pbar.update(int(x.shape[0]))
 
     if pbar is not None:
@@ -307,6 +595,12 @@ def run_eval_epoch(
     batch_samples,
     show_progbar=False,
     n_total=None,
+    shuffle_mode: str = defaults["shuffle_mode"],
+    shuffle_buffer_samples: int = defaults["shuffle_buffer_samples"],
+    shuffle_buffer_chunks: int = defaults["shuffle_buffer_chunks"],
+    exclude_target_channels=None,
+    use_sample_weights: bool = False,
+    input_preprocessing=None,
 ):
     model.eval()
     sum_vloss = 0.0
@@ -317,12 +611,30 @@ def run_eval_epoch(
         pbar = tqdm(total=n_total, desc="Validation", unit="samples", leave=False, dynamic_ncols=True)
 
     with torch.no_grad():
-        for x_np, y_np in inferencer.sample_iter(batch_samples=batch_samples, include_targets=True):
+        for batch in inferencer.sample_iter(batch_samples=batch_samples, include_targets=True, shuffle_mode=shuffle_mode, shuffle_buffer_samples=shuffle_buffer_samples, shuffle_buffer_chunks=shuffle_buffer_chunks, exclude_target_channels=exclude_target_channels, include_weights=use_sample_weights, include_channel_indices=input_preprocessing is not None):
+            if use_sample_weights and input_preprocessing is not None:
+                x_np, y_np, w_np, ch_np = batch
+            elif use_sample_weights:
+                x_np, y_np, w_np = batch
+                ch_np = None
+            elif input_preprocessing is not None:
+                x_np, y_np, ch_np = batch
+                w_np = None
+            else:
+                x_np, y_np = batch
+                w_np = None
+                ch_np = None
+            x_np = apply_input_preprocessing(x_np, input_preprocessing)
+            if input_preprocessing is not None:
+                y_np = apply_target_preprocessing(y_np, ch_np, input_preprocessing)
             x = torch.from_numpy(x_np).to(device=device, dtype=torch.float32)
             y = torch.from_numpy(y_np).to(device=device, dtype=torch.float32)
+            w = None if w_np is None else torch.from_numpy(w_np).to(device=device, dtype=torch.float32)
+            if use_sample_weights and sum_vcount == 0:
+                print_sample_weight_stats(w=w, y=y, split="test")
 
             pred = model(x)
-            loss = masked_mse(pred, y)
+            loss = masked_weighted_mse(pred, y, w) if use_sample_weights else masked_mse(pred, y)
 
             if loss.item() == 0.0 and not torch.any(torch.isfinite(pred) & torch.isfinite(y)):
                 if pbar is not None:
@@ -333,7 +645,7 @@ def run_eval_epoch(
             sum_vcount += 1
 
             if pbar is not None:
-                pbar.set_postfix({"batch_mse": f"{loss.item():.4f}", "steps": sum_vcount})
+                pbar.set_postfix({"batch_loss": f"{loss.item():.4f}", "steps": sum_vcount})
                 pbar.update(int(x.shape[0]))
 
     if pbar is not None:
@@ -384,6 +696,31 @@ def masked_mse(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return (diff * diff).mean()
 
 
+def masked_weighted_mse(pred: torch.Tensor, target: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    valid = torch.isfinite(pred) & torch.isfinite(target) & torch.isfinite(weight) & (weight > 0.0)
+    if not torch.any(valid):
+        return pred.new_tensor(0.0)
+    diff = pred[valid] - target[valid]
+    w = weight[valid]
+    return torch.sum(w * diff * diff) / torch.sum(w)
+
+
+def print_sample_weight_stats(w: torch.Tensor, y: torch.Tensor, split: str) -> None:
+    if w is None:
+        return
+    valid_target = torch.isfinite(y)
+    positive_weight = torch.isfinite(w) & (w > 0.0)
+    n_valid = int(valid_target.sum().item())
+    n_positive = int((valid_target & positive_weight).sum().item())
+    if n_positive == 0:
+        print(f"DNN sample weights ({split}): valid_targets={n_valid}, positive_weights=0")
+        return
+    w_valid = w[valid_target & positive_weight]
+    print(
+        f"DNN sample weights ({split}, first batch): "
+        f"valid_targets={n_valid}, positive_weights={n_positive}, "
+        f"mean={float(w_valid.mean().item()):.6g}, min={float(w_valid.min().item()):.6g}, max={float(w_valid.max().item()):.6g}"
+    )
 def summarize_nonfinite_tensor_2d(
     tensor: torch.Tensor,
     tensor_name: str = "tensor",
@@ -530,77 +867,6 @@ class MSEPlusOffDiagFracLossFlatOrdered(nn.Module):
             "valid_frac": m.mean().detach(),
         }
         return loss, metrics
-
-
-
-class GlobalCoherentNoiseLossFlatOrdered(nn.Module):
-    """
-    Coherent-noise loss computed over ALL channels (single number per batch),
-    using your dir/alt RMS method, applied to residuals.
-
-    Assumes flattened samples ordered as:
-      event0 ch0..chC-1, event1 ch0..chC-1, ...
-    """
-    def __init__(self, eps: float = 1e-12):
-        super().__init__()
-        self.eps = float(eps)
-
-    def forward(self, y_pred_flat: torch.Tensor, y_true_flat: torch.Tensor, n_ch: int):
-        if y_pred_flat.ndim != 1 or y_true_flat.ndim != 1:
-            raise RuntimeError("Expected 1D tensors: y_pred_flat, y_true_flat.")
-        if y_pred_flat.shape[0] != y_true_flat.shape[0]:
-            raise RuntimeError("y_pred_flat and y_true_flat must have same length.")
-        if y_pred_flat.shape[0] % n_ch != 0:
-            raise RuntimeError(f"Batch length N={y_pred_flat.shape[0]} not divisible by n_ch={n_ch}.")
-
-        N = y_pred_flat.shape[0]
-        n_ev = N // n_ch
-
-        yp = y_pred_flat.reshape(n_ev, n_ch)
-        yt = y_true_flat.reshape(n_ev, n_ch)
-
-        m = torch.isfinite(yt).to(dtype=yp.dtype)  # [n_ev, n_ch]
-        yt0 = torch.nan_to_num(yt, nan=0.0, posinf=0.0, neginf=0.0)
-
-        r = (yp - yt0) * m                          # residuals [n_ev, n_ch]
-
-        # If an event has <2 valid channels, drop it from the RMS (like your >=2 guard)
-        nvalid = m.sum(dim=1)                       # [n_ev]
-        m_ev = (nvalid >= 2).to(dtype=yp.dtype)     # [n_ev]
-
-        # per-event sums
-        d = r.sum(dim=1)                            # [n_ev]
-        a = r[:, ::2].sum(dim=1) - r[:, 1::2].sum(dim=1)  # [n_ev]
-
-        # RMS over events (masked)
-        rms_d = torch.sqrt(((d * d) * m_ev).sum() / m_ev.sum().clamp_min(self.eps))
-        rms_a = torch.sqrt(((a * a) * m_ev).sum() / m_ev.sum().clamp_min(self.eps))
-
-        delta = rms_d * rms_d - rms_a * rms_a
-
-        C = torch.tensor(float(n_ch), device=yp.device, dtype=yp.dtype)
-        inc = rms_a / torch.sqrt(C)
-        coh = torch.sign(delta) * torch.sqrt(delta.abs().clamp_min(self.eps)) / C
-
-        mse = masked_mse(y_pred_flat, y_true_flat)
-
-        # loss = coh * coh  # scalar
-        loss = coh + 0.5*mse  # scalar
-
-        # optional monitoring metric (coh vs inc power)
-        f_coh = (coh * coh) / ((coh * coh) + (inc * inc) + self.eps)
-
-        metrics = {
-            "coh_loss": loss.detach(),
-            "coh": coh.detach(),
-            "inc": inc.detach(),
-            "f_coh": f_coh.detach(),
-            "mse": mse.detach(),
-            "valid_event_frac": m_ev.mean().detach(),
-        }
-        return loss, metrics
-
-
 
 
 

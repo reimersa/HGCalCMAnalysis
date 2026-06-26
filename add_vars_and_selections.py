@@ -1,4 +1,4 @@
-#! /eos/user/a/areimers/torch-env/bin/python
+#!/usr/bin/env python3
 
 import argparse
 import os
@@ -80,54 +80,18 @@ def main():
         add_vars_and_selections(cfg=cfg, inferencer=inferencer)
 
 
-def add_vars_and_selections(cfg, inferencer) -> None:
+def add_vars_and_selections(cfg, inferencer, split_selections_only: bool = False) -> None:
     print("Hello from add_vars_and_selections()!")
 
     selections_per_selstring = {
         "selection_full": 
             "",
-        "selection_notot":
-            "nchtot == 0",
-        "selection_notot_notoa":
-            "nchtot == 0 and nchtoa == 0",
-        "selection_notot_notoa_roc0":
-            "nchtot == 0 and nchtoa == 0 and erx00_hastot == 0 and erx01_hastot == 0 and erx00_hastoa == 0 and erx01_hastoa == 0",
-        "selection_notot_notoa_roc2":
-            "nchtot == 0 and nchtoa == 0 and erx04_hastot == 0 and erx05_hastot == 0 and erx04_hastoa == 0 and erx05_hastoa == 0",
-        "selection_notot_roc0":
-            "erx00_hastot == 0 and erx01_hastot == 0",
-        "selection_notot_roc2":
-            "erx04_hastot == 0 and erx05_hastot == 0",
-        "selection_notot_notoa_nosaturatedadc":
-            "nchtot == 0 and nchtoa == 0 and adc_max_pedsub < 900",
-        "selection_notot_notoa_nosaturatedadc_adcsumlt50":
-            "nchtot == 0 and nchtoa == 0 and adc_max_pedsub < 900 and adc_sum_pedsub < 50",
-        "selection_notot_notoa_nosaturatedadc_adcsumgt50":
-            "nchtot == 0 and nchtoa == 0 and adc_max_pedsub < 900 and adc_sum_pedsub > 50",
-        "selection_notot_notoa_nosaturatedadc_adcsumltm170":
-            "nchtot == 0 and nchtoa == 0 and adc_max_pedsub < 900 and adc_sum_pedsub < -170",
-        "selection_notot_notoa_nosaturatedadc_adcsumgtm170":
-            "nchtot == 0 and nchtoa == 0 and adc_max_pedsub < 900 and adc_sum_pedsub > -170",
-        "selection_withtot":
-            "nchtot > 0",
-        "selection_toa0to10":
-            "nchtoa >= 0 and nchtoa < 10",
-        "selection_toa10to20":
-            "nchtoa >= 10 and nchtoa < 20",
-        "selection_toa20to30":
-            "nchtoa >= 20 and nchtoa < 30",
         "selection_trigtime":
             "trig_time > 107 and trig_time < 113 ",
-        "selection_train":
-            "split == 'train'",
         "selection_test":
             "split == 'test'",
-        "adcsumm500to500":
-            "adc_sum_pedsub > -500 and adc_sum_pedsub < 500",
-        "adcsum_residdnn_200to700":
-            "adc_sum_pedsub_resid_dnn > 200 and adc_sum_pedsub_resid_dnn < 700",
-        "adcsum_residdnn_lt200":
-            "adc_sum_pedsub_resid_dnn < 200",
+        "selection_test_trigtime":
+            "split == 'test' and trig_time > 107 and trig_time < 113",
     }
 
 
@@ -136,12 +100,68 @@ def add_vars_and_selections(cfg, inferencer) -> None:
     ped_cols = [c.replace("adc_", "ped_") for c in adc_cols_beforeped]
     adcm1_cols = [f"adcm1_ch{i:03d}" for i in range(cfg.nch)]
     for idx, df_chunk in enumerate(inferencer.full_df_iter()):
+        if split_selections_only:
+            split_file = os.path.join(cfg.dnn_training_input_folder, "event_split_train_test.parquet")
+            if not os.path.isfile(split_file):
+                raise FileNotFoundError(
+                    f"Cannot update split selections because {split_file} does not exist. "
+                    "Run prepare_dnn_inputs first."
+                )
+            if "selection_trigtime" not in df_chunk.columns:
+                raise KeyError(
+                    "Column 'selection_trigtime' is required for split_selections_only=True. "
+                    "Run add_vars_and_selections with split_selections_only=False first."
+                )
+
+            df_split = pd.read_parquet(split_file)
+            split_map = df_split.set_index("event_id_global")["split"]
+            event_ids = df_chunk["event_id"] if "event_id" in df_chunk.columns else df_chunk.index
+            df_chunk["split"] = event_ids.map(split_map)
+            df_chunk["selection_test"] = df_chunk["split"] == "test"
+            df_chunk["selection_test_trigtime"] = df_chunk["selection_test"] & df_chunk["selection_trigtime"].astype(bool)
+
+            outfilename = os.path.join(cfg.analysis_inputs_folder, f"df_batch{idx:03d}.parquet")
+            utils.write_via_tmpdir(
+                outfilename=outfilename,
+                suffix=".parquet",
+                writer_fn=lambda tmp, chunk=df_chunk: chunk.to_parquet(tmp, engine="pyarrow", index=True, compression="zstd"),
+            )
+
+            print(f"Wrote updated df with split selections to {outfilename}, overwriting existing file.")
+            continue
 
         df_chunk["adc_sum_pedsub"] = df_chunk[adc_cols].sum(axis=1, skipna=True)
+        if "nchadcgt10" not in df_chunk.columns:
+            df_chunk["nchadcgt10"] = (df_chunk[adc_cols] > 10).sum(axis=1)
+        if "nchadcgt50" not in df_chunk.columns:
+            df_chunk["nchadcgt50"] = (df_chunk[adc_cols] > 50).sum(axis=1)
+        if "nchadcgt200" not in df_chunk.columns:
+            df_chunk["nchadcgt200"] = (df_chunk[adc_cols] > 200).sum(axis=1)
+        if "nchadcgt500" not in df_chunk.columns:
+            df_chunk["nchadcgt500"] = (df_chunk[adc_cols] > 500).sum(axis=1)
         for erx in range(cfg.nerx):
             df_chunk[f"erx{erx:02d}_hastot"] = df_chunk[[f"tot_ch{chidx:03d}" for chidx in range(cfg.nch_per_erx*erx, cfg.nch_per_erx*(erx+1))]].notna().any(axis=1).astype(int)
         for erx in range(cfg.nerx):
             df_chunk[f"erx{erx:02d}_hastoa"] = df_chunk[[f"toa_ch{chidx:03d}" for chidx in range(cfg.nch_per_erx*erx, cfg.nch_per_erx*(erx+1))]].notna().any(axis=1).astype(int)
+        for erx in range(cfg.nerx):
+            ch_start = cfg.nch_per_erx * erx
+            ch_stop = cfg.nch_per_erx * (erx + 1)
+            adc_cols_erx = [f"adc_ch{chidx:03d}_pedsub" for chidx in range(ch_start, ch_stop)]
+            toa_cols_erx = [f"toa_ch{chidx:03d}" for chidx in range(ch_start, ch_stop)]
+            tot_cols_erx = [f"tot_ch{chidx:03d}" for chidx in range(ch_start, ch_stop)]
+
+            if f"erx{erx:02d}_nchtoa" not in df_chunk.columns:
+                df_chunk[f"erx{erx:02d}_nchtoa"] = df_chunk[toa_cols_erx].notna().sum(axis=1).astype(int)
+            if f"erx{erx:02d}_nchtot" not in df_chunk.columns:
+                df_chunk[f"erx{erx:02d}_nchtot"] = df_chunk[tot_cols_erx].notna().sum(axis=1).astype(int)
+            if f"erx{erx:02d}_nchadcgt10" not in df_chunk.columns:
+                df_chunk[f"erx{erx:02d}_nchadcgt10"] = (df_chunk[adc_cols_erx] > 10).sum(axis=1).astype(int)
+            if f"erx{erx:02d}_nchadcgt50" not in df_chunk.columns:
+                df_chunk[f"erx{erx:02d}_nchadcgt50"] = (df_chunk[adc_cols_erx] > 50).sum(axis=1).astype(int)
+            if f"erx{erx:02d}_nchadcgt200" not in df_chunk.columns:
+                df_chunk[f"erx{erx:02d}_nchadcgt200"] = (df_chunk[adc_cols_erx] > 200).sum(axis=1).astype(int)
+            if f"erx{erx:02d}_nchadcgt500" not in df_chunk.columns:
+                df_chunk[f"erx{erx:02d}_nchadcgt500"] = (df_chunk[adc_cols_erx] > 500).sum(axis=1).astype(int)
         df_chunk["adc_max_pedsub"] = df_chunk[adc_cols].max(axis=1, skipna=True)
         df_chunk["adcm1_max"] = df_chunk[adcm1_cols].max(axis=1, skipna=True)
         df_chunk["event_id"] = df_chunk.index
@@ -156,11 +176,10 @@ def add_vars_and_selections(cfg, inferencer) -> None:
             df_chunk["split"] = df_chunk["event_id"].map(split_map)
         else:
             print(f"[WARNING] Did not define selections into train and test events because the split file ({split_file}) does not exist. Was the split maybe not defined yet? Remember to rerun this function to add those columns.")
-            if "selection_train" in selections_per_selstring:
-                del selections_per_selstring["selection_train"]
             if "selection_test" in selections_per_selstring:
                 del selections_per_selstring["selection_test"]
-
+            if "selection_test_trigtime" in selections_per_selstring:
+                del selections_per_selstring["selection_test_trigtime"]
 
         for sel_col, expr in selections_per_selstring.items():
             if sel_col == "selection_trigtime":

@@ -1,4 +1,4 @@
-#! /eos/user/a/areimers/torch-env/bin/python
+#!/usr/bin/env python3
 
 import argparse
 import os
@@ -11,7 +11,7 @@ import utils
 
 def main():
 
-    parser = argparse.ArgumentParser(description="Compute all possible variants of covariance matrices.")
+    parser = argparse.ArgumentParser(description="Project ADC columns onto covariance eigenmodes for diagnostics.")
     parser.add_argument(
         "-r",
         "--run",
@@ -32,14 +32,14 @@ def main():
         "--k",
         type=int,
         default=1,
-        help="How many modes to subtract.",
+        help="Eigenmode index to project onto.",
     )
     parser.add_argument(
         "-c",
         "--column-tag",
         type=str,
         default="",
-        help="Column tag to be appended at the end of 'adc_ch{i:03d}_pedsub'. E.g.: '_pred_analytic_k0' when APPLYING the noisemode subtraction",
+        help="Column tag to be appended at the end of 'adc_ch{i:03d}_pedsub'. E.g. '_resid_analytic_k0' for analytic residuals.",
     )
     parser.add_argument(
         "-m",
@@ -84,7 +84,7 @@ def main():
 
     for cfg in cfgs:
         inferencer = inferencers.AnalysisTruthInferencer(cfg=cfg)
-        add_projections_onto_noisemode(cfg=cfg, inferencer=inferencer)
+        add_projections_onto_noisemode(cfg=cfg, inferencer=inferencer, column_tag=args.column_tag, k=args.k)
 
 
 def add_projections_onto_noisemode(cfg, inferencer, column_tag, k: int) -> None:

@@ -1,0 +1,19 @@
+#------------ train_dnn.sub.template ------------
+Universe   = vanilla
+
+Executable = {WRAPPER}
+
+environment = "X509_USER_PROXY={VOMS}"
+
+request_gpus = {GPUS}
+
+Log        = {LOGDIR}/{NAME}.log
+Output     = {LOGDIR}/{NAME}.out
+Error      = {LOGDIR}/{NAME}.err
+
+RequestMemory  = {MEMGB} GB
+RequestCpus    = {CPUS}
++JobFlavour    = "{JOBFLAVOR}"
+
+Queue 1
+#-----------------------------------------------

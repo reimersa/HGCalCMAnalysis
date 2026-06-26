@@ -1,4 +1,4 @@
-#! /eos/user/a/areimers/torch-env/bin/python
+#!/usr/bin/env python3
 import os
 import numpy as np # type: ignore
 import uproot # type: ignore
