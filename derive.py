@@ -25,9 +25,10 @@ def build_parser():
     parser.add_argument("-c", "--convert", action="store_true", help="Convert ROOT inputs to parquet analysis inputs.")
     parser.add_argument("-s", "--selections", action="store_true", help="Add variables and event selections.")
     parser.add_argument("-a", "--analytic", action="store_true", help="Compute covariance/eigen artifacts and analytic predictor.")
-    parser.add_argument("-d", "--localdnn", action="store_true", help="Prepare DNN inputs, refresh split selections, and train one DNN locally.")
-    parser.add_argument("-q", "--submitdnn", action="store_true", help="Prepare DNN inputs, refresh split selections, and submit DNN Condor jobs.")
-    parser.add_argument("--all", action="store_true", help="Run all derivation steps, using Condor submission for DNN training.")
+    parser.add_argument("-i", "--dnninputs", action="store_true", help="Prepare DNN inputs and refresh train/test split selections.")
+    parser.add_argument("-d", "--localdnn", action="store_true", help="Train one DNN locally using existing prepared DNN inputs.")
+    parser.add_argument("-q", "--submitdnn", action="store_true", help="Submit DNN Condor jobs using existing prepared DNN inputs.")
+    parser.add_argument("--all", action="store_true", help="Run all derivation steps, including DNN input preparation and Condor DNN submission.")
     parser.add_argument("--show", action="store_true", help="Print the configured setup and available steps, then exit.")
     return parser
 
@@ -39,6 +40,7 @@ def any_step_requested(args) -> bool:
             args.convert,
             args.selections,
             args.analytic,
+            args.dnninputs,
             args.localdnn,
             args.submitdnn,
             args.all,
@@ -46,15 +48,16 @@ def any_step_requested(args) -> bool:
     )
 
 
-def print_setup(parser, modulenames, correction_run, pedestal_run, selection_for_correction, per_channel_cols) -> None:
+def print_setup(parser, modulenames, correction_run, pedestal_run, selection_for_correction, per_channel_cols, include_help=False) -> None:
     print("derive.py setup:")
     print(f"  modules: {modulenames}")
     print(f"  correction_run: {correction_run}")
     print(f"  pedestal_run: {pedestal_run}")
     print(f"  selection_for_correction: {selection_for_correction}")
     print(f"  per_channel_cols: {per_channel_cols}")
-    print("")
-    print(parser.format_help().rstrip())
+    if include_help:
+        print("")
+        print(parser.format_help().rstrip())
 
 
 def make_pedestal_cfg(modulename, pedestal_run):
@@ -93,8 +96,19 @@ def main():
             pedestal_run=pedestal_run,
             selection_for_correction=selection_for_correction,
             per_channel_cols=per_channel_cols,
+            include_help=True,
         )
         return
+
+    print_setup(
+        parser=parser,
+        modulenames=modulenames,
+        correction_run=correction_run,
+        pedestal_run=pedestal_run,
+        selection_for_correction=selection_for_correction,
+        per_channel_cols=per_channel_cols,
+    )
+    print("")
 
     cfgs = [
         classes.AnalysisConfig(
@@ -123,21 +137,21 @@ def main():
                 convert_to_df.convert_to_df_synthetic(cfg=cfg, adcmax=cfg.adcmax)
 
         inferencer = None
-        if args.selections or args.localdnn or args.submitdnn or args.all:
+        if args.selections or args.dnninputs or args.all:
             inferencer = inferencers.AnalysisTruthInferencer(cfg=cfg)
 
         if args.selections or args.all:
             add_vars_and_selections.add_vars_and_selections(cfg=cfg, inferencer=inferencer)
 
         inferencer_sel = None
-        if args.analytic or args.localdnn or args.submitdnn or args.all:
+        if args.analytic or args.dnninputs or args.all:
             inferencer_sel = inferencers.AnalysisTruthInferencer(cfg=cfg, selection=selection_for_correction)
 
         if args.analytic or args.all:
             compute_covariances_and_eigen.compute_covariances_and_eigen(cfg=cfg, inferencer=inferencer_sel, column_tag="")
             compute_predictor_analytic.compute_predictor_analytic(cfg=cfg)
 
-        if args.localdnn or args.submitdnn or args.all:
+        if args.dnninputs or args.all:
             prepare_dnn_inputs.prepare_dnn_inputs(cfg=cfg, column_tag="", inferencer=inferencer_sel, nch_to_use=None)
             add_vars_and_selections.add_vars_and_selections(cfg=cfg, inferencer=inferencer, split_selections_only=True)
 

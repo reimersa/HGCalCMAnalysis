@@ -95,8 +95,27 @@ def main(args, parser):
             dnn_preprocess_inputs=dnn_preprocess_inputs,
             dnn_resolved_tag=dnn_resolved_tag,
             dnn_output_tag=dnn_output_tag,
+            include_help=True,
         )
         return
+
+    print_setup(
+        parser=parser,
+        modulenames=modulenames,
+        target_run=target_run,
+        correction_run=correction_run,
+        pedestal_run=pedestal_run,
+        module_for_correction=module_for_correction,
+        selection=selection,
+        selection_for_correction=selection_for_correction,
+        n_coherent_noise_model=n_coherent_noise_model,
+        per_channel_cols=per_channel_cols,
+        dnn_tag=dnn_tag,
+        dnn_preprocess_inputs=dnn_preprocess_inputs,
+        dnn_resolved_tag=dnn_resolved_tag,
+        dnn_output_tag=dnn_output_tag,
+    )
+    print("")
 
     methods_to_run = selected_methods(args)
     cfgs = make_cfgs(
@@ -205,6 +224,7 @@ def print_setup(
     dnn_preprocess_inputs,
     dnn_resolved_tag,
     dnn_output_tag,
+    include_help=False,
 ) -> None:
     print("apply.py setup:")
     print(f"  modules: {modulenames}")
@@ -220,8 +240,9 @@ def print_setup(
     print(f"  dnn_preprocess_inputs: {dnn_preprocess_inputs}")
     print(f"  dnn_resolved_tag: {dnn_resolved_tag}")
     print(f"  dnn_output_tag: {dnn_output_tag}")
-    print("")
-    print(parser.format_help().rstrip())
+    if include_help:
+        print("")
+        print(parser.format_help().rstrip())
 
 
 def selected_methods(args) -> list[str]:

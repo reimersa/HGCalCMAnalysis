@@ -89,9 +89,10 @@ Available derive steps:
 -c, --convert     convert ROOT/synthetic inputs to parquet
 -s, --selections  add variables and event selections
 -a, --analytic    compute covariance/eigen artifacts and analytic predictor
--d, --localdnn    prepare DNN inputs, refresh split selections, train one DNN locally
--q, --submitdnn   prepare DNN inputs, refresh split selections, submit DNN Condor jobs
-    --all         run pedestals, convert, selections, analytic, and submitdnn
+-i, --dnninputs   prepare DNN inputs and refresh train/test split selections
+-d, --localdnn    train one DNN locally using existing prepared DNN inputs
+-q, --submitdnn   submit DNN Condor jobs using existing prepared DNN inputs
+    --all         run pedestals, convert, selections, analytic, dnninputs, and submitdnn
 ```
 
 Typical full derivation with Condor DNN training:
@@ -106,16 +107,18 @@ Typical stepwise derivation:
 python derive.py -p
 python derive.py -c
 python derive.py -s -a
+python derive.py -i
 python derive.py -q
 ```
 
 Local DNN training alternative:
 
 ```bash
+python derive.py -i
 python derive.py -d
 ```
 
-`--localdnn`, `--submitdnn`, and `--all` prepare DNN inputs and then refresh only the train/test split selections from the DNN split file.
+`--dnninputs` prepares DNN inputs and then refreshes only the train/test split selections from the DNN split file. It only needs to be rerun when the underlying analysis inputs, selections, or DNN input features change. If only the DNN architecture, training tag, or training hyperparameters change, rerun `--localdnn` or `--submitdnn` without `--dnninputs`.
 
 ## Condor DNN Submission
 
