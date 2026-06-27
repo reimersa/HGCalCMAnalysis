@@ -1,4 +1,4 @@
-#! /eos/user/a/areimers/torch-env/bin/python
+#!/usr/bin/env python3
 
 import argparse
 import os
@@ -130,6 +130,7 @@ def plot_summaries(
     inferencer,
     selection,
     column_tags,
+    n_coherent_noise_model: int = 3,
     x_range: Optional[Tuple[float, float]] = None,
     y_range: Optional[Tuple[float, float]] = None,
     cm_x_range: Tuple[float, float] = (-50.0, 25.0),
@@ -159,18 +160,34 @@ def plot_summaries(
         x_range=x_range,
         y_range=None,
     )
-    for erx in range(cfg.nerx):
-        functions_plot.plot_adc_profile_vs_cm_overlay(
-            cfg=cfg,
-            value_iterator=inferencer.full_df_iter,
-            column_tags=column_tags,
-            erx=erx,
-            out_root=os.path.join(plot_dir, "summaries_compare", "per_erx_adc_profile_vs_cm"),
-            x_range=cm_x_range,
-            nbins_y=75,
-            y_range=cm_adc_range,
-            profile_y_range=cm_profile_y_range,
-        )
+    functions_plot.plot_noise_model_coherent_vs_cell_area(
+        cfg=cfg,
+        column_tags=column_tags,
+        out_root=os.path.join(plot_dir, "summaries_compare", "noise_vs_cell_area"),
+        n_coherent=n_coherent_noise_model,
+        x_range=x_range,
+        y_range=y_range,
+    )
+    functions_plot.plot_noise_model_incoherent_vs_cell_area(
+        cfg=cfg,
+        column_tags=column_tags,
+        out_root=os.path.join(plot_dir, "summaries_compare", "noise_vs_cell_area"),
+        n_coherent=n_coherent_noise_model,
+        x_range=x_range,
+        y_range=y_range,
+    )
+    # for erx in range(cfg.nerx):
+    #     functions_plot.plot_adc_profile_vs_cm_overlay(
+    #         cfg=cfg,
+    #         value_iterator=inferencer.full_df_iter,
+    #         column_tags=column_tags,
+    #         erx=erx,
+    #         out_root=os.path.join(plot_dir, "summaries_compare", "per_erx_adc_profile_vs_cm"),
+    #         x_range=cm_x_range,
+    #         nbins_y=75,
+    #         y_range=cm_adc_range,
+    #         profile_y_range=cm_profile_y_range,
+    #     )
 
     print("Successfully finished summary plotting!")
 

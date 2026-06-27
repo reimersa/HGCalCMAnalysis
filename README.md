@@ -7,7 +7,7 @@ This directory contains the scripts used to prepare analysis inputs and derive c
 - analytic linear regression
 - DNN regression
 
-Application and plotting/evaluation are still being refactored and will be documented after `apply.py` is updated.
+Application and plotting/evaluation are controlled by `apply.py`.
 
 ## Get the Code
 
@@ -129,4 +129,75 @@ Before submitting, make sure a VOMS proxy exists at:
 
 ## Apply Workflow
 
-The apply/evaluation workflow is still being cleaned up. This section will be updated after the `apply.py` refactor.
+The application workflow is controlled by `apply.py`.
+
+First edit the setup block near the top of `apply.py`:
+
+- `modulenames`
+- `selection`
+- `selection_for_correction`
+- `target_run`
+- `pedestal_run`
+- `correction_run`
+- `module_for_correction`
+- DNN settings: `dnn_tag` and `dnn_preprocess_inputs`
+
+Running `apply.py` without flags prints the current setup and exits.
+
+Show the configured setup and available options:
+
+```bash
+python apply.py --show
+python apply.py --help
+```
+
+Available apply steps:
+
+```text
+-c, --convert     convert target ROOT/synthetic inputs to parquet
+-s, --selections  add variables and event selections on the target run
+-m, --methods     choose methods: uncorrected analytic dnn
+-k, --compute     add corrections where applicable, then compute diagnostics
+-p, --plots       make detailed plots and summary comparison plots
+    --all         run convert, selections, compute, and plots for all methods
+```
+
+`--compute` always runs the method-specific correction step together with the downstream diagnostics: covariance/eigen outputs, fitted covariance noise model, and projection onto the uncorrected noise mode. For `uncorrected`, no correction is added; only the diagnostics are computed.
+
+`--plots` makes the detailed plots and summary comparison plots together. It is useful when the correction and diagnostics already exist and only the plots need to be rerun.
+
+Typical stepwise application:
+
+```bash
+python apply.py -c
+python apply.py -s
+python apply.py -m uncorrected -k
+python apply.py -m analytic dnn -k
+python apply.py -m dnn -p
+```
+
+Compute and plot only the DNN method:
+
+```bash
+python apply.py -m dnn -k -p
+```
+
+Full sweep over all methods:
+
+```bash
+python apply.py -m uncorrected analytic dnn -c -s -k -p
+```
+
+The DNN strategy is selected inside the setup block. The current default is:
+
+```python
+dnn_tag = "chunkshuffle_modulesummaries_targetspreproc"
+dnn_preprocess_inputs = True
+```
+
+The baseline DNN can be selected by switching to:
+
+```python
+dnn_tag = ""
+dnn_preprocess_inputs = False
+```

@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import subprocess
 import tempfile
 import numpy as np # type: ignore
@@ -288,8 +289,9 @@ class Streaming1DHist:
         self.x_sum += np.sum(x)
         self.x_sum2 += np.sum(x*x)
 
-        # window-restricted stats (-10, 10)
-        w_mask = (x >= -10) & (x <= 10)
+        # window-restricted stats for the shared figure-of-merit window
+        xmin, xmax = utils.FOM_WINDOW
+        w_mask = (x >= xmin) & (x <= xmax)
         xw = x[w_mask]
         self.xw_count += xw.shape[0]
         self.xw_sum   += np.sum(xw)
@@ -374,16 +376,23 @@ def plot_vs_chidx(cfg, varname_y_template: str, value_iterator, out_root: str, n
     # 3) streamed passes
     # --- PRED ---
     hist_pred = Streaming2DHist(x_min=chidx_min, x_max=chidx_max, y_min=y_range[0], y_max=y_range[1], nbins_x=nbins_x, nbins_y=nbins_y)
+    found_cols = False
     for full_df in value_iterator():
         cols_y = [c for c in full_df.columns if fnmatch(c, varname_y_template)]
         if not cols_y:
-            print(f"[WARNING] No columns found that match the template {varname_y_template}. Skipping.")
             continue
+        found_cols = True
         
         x = np.tile(np.arange(chidx_min, chidx_max+1), full_df[cols_y].shape[0])
         y = full_df[cols_y].to_numpy().ravel()
         hist_pred.add(x, y)
+    if not found_cols:
+        print(f"[WARNING] No columns found that match the template {varname_y_template}. Skipping channel-index plot.")
+        return
     x_ct_p, mean_p, rms_p = hist_pred.x_profile()
+    if np.all(np.isnan(mean_p)):
+        print(f"Means are all NaN for {varname_y_template} vs. channel index. Skipping this combination.")
+        return
     print(f"Maximum avg-per-channel-adc vs. channel index: {np.nanmax(mean_p)} at {x_ct_p[np.nanargmax(mean_p)]}")
 
     utils.plot_y_vs_x_with_marginals_hist(
@@ -396,36 +405,50 @@ def plot_vs_chidx(cfg, varname_y_template: str, value_iterator, out_root: str, n
 def plot_2d_multicol_vs_var(varname_x: str, varname_y_template: str, value_iterator, out_root: str, nbins_x: int = None, x_range=None, nbins_y: int = 80, y_range: tuple[float,float] = (-20., 20.), make_profile_plot=False):
     os.makedirs(out_root, exist_ok=True)
 
-    if x_range:
+    if x_range is not None:
         var_min, var_max = x_range
     else:
         first = True
         for df in value_iterator():
-            vals = df[varname_x]
+            if varname_x not in df.columns:
+                print(f"[WARNING] Column '{varname_x}' not found. Skipping {varname_y_template} vs. {varname_x}.")
+                return
+            vals = df[varname_x].to_numpy(dtype=np.float64, copy=False)
+            vals = vals[np.isfinite(vals)]
             if len(vals) == 0:
                 continue
             if first:
-                var_min = min(vals)
-                var_max = max(vals)
+                var_min = np.min(vals)
+                var_max = np.max(vals)
             else:
-                var_min = min(min(vals), var_min)
-                var_max = max(max(vals), var_max)
+                var_min = min(np.min(vals), var_min)
+                var_max = max(np.max(vals), var_max)
             first = False
+        if first:
+            print(f"[WARNING] No valid x values found for {varname_y_template} vs. {varname_x}. Skipping.")
+            return
 
     # 3) streamed passes
     # --- PRED ---
     hist_pred = Streaming2DHist(x_min=var_min, x_max=var_max, y_min=y_range[0], y_max=y_range[1], nbins_x=nbins_x, nbins_y=nbins_y)
+    found_cols = False
     for full_df in value_iterator():
+        if varname_x not in full_df.columns:
+            print(f"[WARNING] Column '{varname_x}' not found. Skipping {varname_y_template} vs. {varname_x}.")
+            return
         cols_y = [c for c in full_df.columns if fnmatch(c, varname_y_template)]
         if not cols_y:
-            print(f"[WARNING] No columns found that match the template {varname_y_template}. Skipping.")
             continue
+        found_cols = True
         x = full_df[varname_x].to_numpy()
         y = full_df[cols_y].to_numpy()
         x_rep = np.repeat(x, len(cols_y))      # (N*M,)
         y_flat = y.ravel()                     # (N*M,)
 
         hist_pred.add(x_rep, y_flat)
+    if not found_cols:
+        print(f"[WARNING] No columns found that match the template {varname_y_template}. Skipping.")
+        return
     x_ct_p, mean_p, rms_p = hist_pred.x_profile()
     if np.all(np.isnan(mean_p)):
         print(f"Means are all NaN for {varname_y_template} vs. {varname_x}. Skipping this combination.")
@@ -878,7 +901,8 @@ def plot_module_hexmap(
         sum_vals += np.nansum(vals, axis=0)
         count_vals += np.sum(mask, axis=0)
 
-        window_mask = mask & (vals >= -10.0) & (vals <= 10.0)
+        xmin, xmax = utils.FOM_WINDOW
+        window_mask = mask & (vals >= xmin) & (vals <= xmax)
         window_vals = np.where(window_mask, vals, 0.0)
         window_sum_vals += np.sum(window_vals, axis=0)
         window_sum_vals2 += np.sum(window_vals * window_vals, axis=0)
@@ -955,8 +979,8 @@ def plot_module_hexmap(
         values=np.nan_to_num(mean_window_vals, nan=0.0).astype(float),
         output_filename=os.path.join(out_root, f"{sanitized}_mean_window_hexmap.pdf"),
         module_type=module_type,
-        ztitle=f"mean [-10, 10] {sanitized}",
-        title=f"Mean [-10, 10] {sanitized}{title_suffix}",
+        ztitle=f"mean {utils.fom_window_label()} {sanitized}",
+        title=f"Mean {utils.fom_window_label()} {sanitized}{title_suffix}",
         zrange=(-2.5, 2.5),
         labels=None,
     )
@@ -965,31 +989,310 @@ def plot_module_hexmap(
         values=np.nan_to_num(rms_window_vals, nan=0.0).astype(float),
         output_filename=os.path.join(out_root, f"{sanitized}_rms_window_hexmap.pdf"),
         module_type=module_type,
-        ztitle=f"RMS [-10, 10] {sanitized}",
-        title=f"RMS [-10, 10] {sanitized}{title_suffix}",
+        ztitle=f"RMS {utils.fom_window_label()} {sanitized}",
+        title=f"RMS {utils.fom_window_label()} {sanitized}{title_suffix}",
         zrange=(0., 5.),
         labels=None,
     )
 
-def plot_1d_multicol(varname_template: str, value_iterator, out_root: str, nbins_x: int = None, x_range=None, do_gauss_fit=False, gauss_p0=None):
+
+def _channel_index_from_adc_colname(colname: str) -> int:
+    match = re.search(r"adc_ch(\d+)_", colname)
+    if match is None:
+        raise ValueError(f"Could not extract channel index from column name '{colname}'.")
+    return int(match.group(1))
+
+
+def _source_sort_key(source):
+    try:
+        return (0, float(source), str(source))
+    except (TypeError, ValueError):
+        return (1, 0.0, str(source))
+
+
+def _positive_mse_zrange(values: np.ndarray) -> tuple[float, float]:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return (0.0, 1.0)
+    zmin = float(np.nanmin(finite))
+    zmax = float(np.nanmax(finite))
+    if np.isclose(zmin, zmax):
+        delta = 1.0 if np.isclose(zmin, 0.0) else 0.1 * abs(zmin)
+        return (max(0.0, zmin - delta), zmax + delta)
+    return (max(0.0, zmin), zmax)
+
+
+def plot_mse_diagnostics(
+    cfg,
+    varname_template: str,
+    value_iterator,
+    out_root: str,
+    source_col: str = "source_run",
+) -> None:
+    os.makedirs(out_root, exist_ok=True)
+
+    val_cols = None
+    channel_indices = None
+    sse_by_channel = None
+    count_by_channel = None
+    sse_by_source = {}
+    count_by_source = {}
+    sse_by_source_channel = {}
+    count_by_source_channel = {}
+    warned_missing_source = False
+
+    for full_df in value_iterator():
+        matched = [c for c in full_df.columns if fnmatch(c, varname_template)]
+        if not matched:
+            continue
+        matched = sorted(matched, key=_channel_index_from_adc_colname)
+
+        if val_cols is None:
+            val_cols = matched
+            channel_indices = np.asarray([_channel_index_from_adc_colname(c) for c in val_cols], dtype=int)
+            sse_by_channel = np.zeros(len(val_cols), dtype=np.float64)
+            count_by_channel = np.zeros(len(val_cols), dtype=np.int64)
+        elif matched != val_cols:
+            raise ValueError(
+                f"Matched columns changed across chunks for template {varname_template}. "
+                f"Expected {val_cols}, found {matched}."
+            )
+
+        vals = full_df[val_cols].to_numpy(dtype=np.float64, copy=False)
+        mask = np.isfinite(vals)
+        vals2 = np.where(mask, vals * vals, 0.0)
+        sse_by_channel += vals2.sum(axis=0)
+        count_by_channel += mask.sum(axis=0)
+
+        if source_col in full_df.columns:
+            source_values = full_df[source_col].to_numpy(copy=False)
+        else:
+            if not warned_missing_source:
+                print(
+                    f"[WARNING] Column '{source_col}' not found while plotting MSE diagnostics. "
+                    f"Using cfg.run={cfg.run!r} as a single source label."
+                )
+                warned_missing_source = True
+            source_values = np.full(len(full_df), str(cfg.run), dtype=object)
+
+        for source in np.unique(source_values):
+            rows = source_values == source
+            source_vals2 = vals2[rows]
+            source_mask = mask[rows]
+            if source not in sse_by_source:
+                sse_by_source[source] = 0.0
+                count_by_source[source] = 0
+                sse_by_source_channel[source] = np.zeros(len(val_cols), dtype=np.float64)
+                count_by_source_channel[source] = np.zeros(len(val_cols), dtype=np.int64)
+
+            sse_by_source[source] += float(source_vals2.sum())
+            count_by_source[source] += int(source_mask.sum())
+            sse_by_source_channel[source] += source_vals2.sum(axis=0)
+            count_by_source_channel[source] += source_mask.sum(axis=0)
+
+    if val_cols is None or sse_by_channel is None or count_by_channel is None or channel_indices is None:
+        print(f"[WARNING] No columns found that match the template {varname_template}. Skipping MSE diagnostics.")
+        return
+
+    total_sse = float(sse_by_channel.sum())
+    total_count = int(count_by_channel.sum())
+    global_mse = total_sse / total_count if total_count > 0 else np.nan
+    mse_by_channel = np.divide(
+        sse_by_channel,
+        count_by_channel,
+        out=np.full_like(sse_by_channel, np.nan),
+        where=count_by_channel > 0,
+    )
+
+    rank_order = np.argsort(np.nan_to_num(mse_by_channel, nan=-np.inf))[::-1]
+    ranks = np.arange(len(rank_order), dtype=int)
+    sorted_mse = mse_by_channel[rank_order]
+    sorted_channels = channel_indices[rank_order]
+    sorted_sse = sse_by_channel[rank_order]
+    contribution_fraction = np.divide(
+        sorted_sse,
+        total_sse,
+        out=np.zeros_like(sorted_sse),
+        where=total_sse > 0.0,
+    )
+    cumulative_fraction = np.cumsum(contribution_fraction)
+
+    fig, ax = plt.subplots(figsize=(8.6, 5.0))
+    ax.plot(ranks, sorted_mse, color="tab:blue", lw=1.8, marker=".", ms=4, label="Channel MSE")
+    ax.set_xlabel("channel rank by descending MSE")
+    ax.set_ylabel("MSE")
+    ax.grid(ls="--", alpha=0.3)
+    finite_positive = sorted_mse[np.isfinite(sorted_mse) & (sorted_mse > 0.0)]
+    if finite_positive.size > 0:
+        ax.set_yscale("log")
+    ax2 = ax.twinx()
+    ax2.plot(ranks, cumulative_fraction, color="tab:red", lw=1.8, label="Cumulative SSE fraction")
+    ax2.set_ylabel("cumulative SSE fraction")
+    ax2.set_ylim(0.0, 1.02)
+    lines = ax.get_lines() + ax2.get_lines()
+    ax.legend(lines, [line.get_label() for line in lines], loc="best")
+    ax.set_title(f"Residual MSE by channel rank; global MSE={global_mse:.4g}")
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_root, "mse_by_channel_rank.pdf"))
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(8.6, 5.0))
+    ax.plot(channel_indices, mse_by_channel, color="tab:blue", lw=1.5, marker=".", ms=4)
+    ax.set_xlabel("channel index")
+    ax.set_ylabel("MSE")
+    ax.grid(ls="--", alpha=0.3)
+    finite_positive = mse_by_channel[np.isfinite(mse_by_channel) & (mse_by_channel > 0.0)]
+    if finite_positive.size > 0:
+        ax.set_yscale("log")
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_root, "mse_by_channel_index.pdf"))
+    plt.close(fig)
+
+    source_labels = sorted(sse_by_source.keys(), key=_source_sort_key)
+    source_mse = np.asarray(
+        [
+            sse_by_source[source] / count_by_source[source]
+            if count_by_source[source] > 0
+            else np.nan
+            for source in source_labels
+        ],
+        dtype=float,
+    )
+    source_label_strs = [str(source) for source in source_labels]
+
+    fig, ax = plt.subplots(figsize=(max(6.0, 0.8 * len(source_labels)), 5.0))
+    ax.bar(np.arange(len(source_labels)), source_mse, color="tab:blue", alpha=0.8)
+    ax.set_xticks(np.arange(len(source_labels)))
+    ax.set_xticklabels(source_label_strs, rotation=45, ha="right")
+    ax.set_xlabel("source run")
+    ax.set_ylabel("MSE")
+    ax.grid(axis="y", ls="--", alpha=0.3)
+    finite_positive = source_mse[np.isfinite(source_mse) & (source_mse > 0.0)]
+    if finite_positive.size > 0:
+        ax.set_yscale("log")
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_root, "mse_by_source_run.pdf"))
+    plt.close(fig)
+
+    source_channel_mse = np.vstack(
+        [
+            np.divide(
+                sse_by_source_channel[source],
+                count_by_source_channel[source],
+                out=np.full(len(val_cols), np.nan, dtype=float),
+                where=count_by_source_channel[source] > 0,
+            )
+            for source in source_labels
+        ]
+    )
+
+    fig, ax = plt.subplots(figsize=(10.0, max(3.8, 0.45 * len(source_labels))))
+    finite_heat = source_channel_mse[np.isfinite(source_channel_mse)]
+    if finite_heat.size > 0:
+        vmin = float(np.nanmin(finite_heat))
+        vmax = float(np.nanmax(finite_heat))
+    else:
+        vmin, vmax = 0.0, 1.0
+    image = ax.imshow(
+        source_channel_mse,
+        aspect="auto",
+        interpolation="nearest",
+        origin="lower",
+        vmin=vmin,
+        vmax=vmax,
+    )
+    ax.set_xlabel("channel index")
+    ax.set_ylabel("source run")
+    ax.set_yticks(np.arange(len(source_labels)))
+    ax.set_yticklabels(source_label_strs)
+    if len(channel_indices) > 0:
+        tick_step = max(1, int(np.ceil(len(channel_indices) / 12)))
+        tick_positions = np.arange(0, len(channel_indices), tick_step)
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels([str(channel_indices[idx]) for idx in tick_positions], rotation=45, ha="right")
+    cbar = fig.colorbar(image, ax=ax)
+    cbar.set_label("MSE")
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_root, "mse_by_source_run_channel_heatmap.pdf"))
+    plt.close(fig)
+
+    fig, ax = plt.subplots(figsize=(9.2, 5.4))
+    cmap = plt.get_cmap("tab10" if len(source_labels) <= 10 else "tab20")
+    for idx_source, source in enumerate(source_labels):
+        color = cmap(idx_source % cmap.N)
+        ax.plot(
+            channel_indices,
+            source_channel_mse[idx_source],
+            lw=1.4,
+            marker=".",
+            ms=3,
+            color=color,
+            label=str(source),
+        )
+    ax.set_xlabel("channel index")
+    ax.set_ylabel("MSE")
+    ax.grid(ls="--", alpha=0.3)
+    finite_positive = source_channel_mse[np.isfinite(source_channel_mse) & (source_channel_mse > 0.0)]
+    if finite_positive.size > 0:
+        ax.set_yscale("log")
+    if len(source_labels) <= 12:
+        ax.legend(title="source run", fontsize=8, title_fontsize=9, loc="best")
+    else:
+        ax.legend(title="source run", fontsize=7, title_fontsize=8, loc="center left", bbox_to_anchor=(1.02, 0.5))
+    fig.tight_layout()
+    fig.savefig(os.path.join(out_root, "mse_by_channel_index_by_source_run.pdf"))
+    plt.close(fig)
+
+    module_type = cfg.modulename[:4].replace("-", "_")
+    _draw_wafer_hist_pdf(
+        values=np.nan_to_num(mse_by_channel, nan=0.0).astype(float),
+        output_filename=os.path.join(out_root, "mse_by_channel_hexmap.pdf"),
+        module_type=module_type,
+        ztitle="MSE",
+        title="Residual MSE by channel",
+        zrange=_positive_mse_zrange(mse_by_channel),
+        labels=None,
+    )
+
+    top_channels = ", ".join(
+        f"ch{int(ch):03d}={mse:.4g}"
+        for ch, mse in zip(sorted_channels[:5], sorted_mse[:5])
+        if np.isfinite(mse)
+    )
+    print(
+        f"Saved residual MSE diagnostics to {out_root}. "
+        f"Global MSE={global_mse:.6g}; top channels: {top_channels}"
+    )
+
+def plot_1d_multicol(varname_template: str, value_iterator, out_root: str, nbins_x: int = None, x_range=None, do_gauss_fit=False, gauss_p0=None, make_logy: bool=False):
     os.makedirs(out_root, exist_ok=True)
         
     hist = Streaming1DHist(x_min=x_range[0], x_max=x_range[1], nbins_x=nbins_x)
+    found_cols = False
     for full_df in value_iterator():
         cols = [c for c in full_df.columns if fnmatch(c, varname_template)]
+        if not cols:
+            continue
+        found_cols = True
         values = full_df[cols].to_numpy().ravel()
         hist.add(values)
+    if not found_cols:
+        print(f"[WARNING] No columns found that match the template {varname_template}. Skipping 1D plot.")
+        return
     outpath = os.path.join(out_root, f"{varname_template.replace('*', 'all').replace('?', '')}_1d.pdf")
     if do_gauss_fit:
         outpath = outpath.replace("_1d.pdf", "_gaussfit_1d.pdf")
     utils.plot_hist_single_precomputed(x=hist.H, mean=hist.x_mean_rms()[0], rms=hist.x_mean_rms()[1], mean_window=hist.x_mean_rms_window()[0], rms_window=hist.x_mean_rms_window()[1], bins=hist.x_edges, xlabel=f"{varname_template}", ylabel="Number of events", title="", color="gray", outpath=outpath, show_mean_line=True, do_gauss_fit=do_gauss_fit, gauss_p0=gauss_p0)
+    if make_logy:
+        outpath_logy = outpath.replace(".pdf", "_logy.pdf")
+        utils.plot_hist_single_precomputed(x=hist.H, mean=hist.x_mean_rms()[0], rms=hist.x_mean_rms()[1], mean_window=hist.x_mean_rms_window()[0], rms_window=hist.x_mean_rms_window()[1], bins=hist.x_edges, xlabel=f"{varname_template}", ylabel="Number of events", title="", color="gray", outpath=outpath_logy, show_mean_line=True, do_gauss_fit=do_gauss_fit, gauss_p0=gauss_p0, logy=True)
 
 
 
 def _load_cell_areas(cfg: classes.AnalysisConfig) -> np.ndarray:
     module_type = cfg.modulename[:4].replace("-", "_")
     cellareas_path = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "data", "cellareas.json")
+        os.path.join(os.path.dirname(__file__), "data", "cellareas.json")
     )
 
     with open(cellareas_path, "r", encoding="utf-8") as handle:
@@ -1025,7 +1328,24 @@ def _add_full_cell_area_tag(ax, full_cell_area_mm2: Optional[float], y_pos: floa
     ax.text(
         0.05,
         y_pos,
-        f"Full cell area: {full_cell_area_mm2:.2f} mm$^2$",
+        f"Standard cell area: {full_cell_area_mm2:.2f} mm$^2$",
+        transform=ax.transAxes,
+        fontsize=fontsize,
+        color="0.0",
+        ha="left",
+        va="top",
+    )
+
+
+def _add_run_type_tag(ax, run, y_pos: float = 0.68, fontsize: int = 14) -> None:
+    if not isinstance(run, int):
+        run_type_label = "Multiple runs"
+    else:
+        run_type_label = "Pedestal run" if classes.is_pedestal_run(run) else "Electron beam run"
+    ax.text(
+        0.05,
+        y_pos,
+        run_type_label,
         transform=ax.transAxes,
         fontsize=fontsize,
         color="0.0",
@@ -1281,7 +1601,7 @@ def _plot_noise_vs_cell_area_rms(
             label=curve["label"],
         )
 
-    ax.set_xlabel("Cell area / full cell area", fontsize=20, loc="right", labelpad=8)
+    ax.set_xlabel("Cell area / standard cell area", fontsize=20, loc="right", labelpad=8)
     ax.set_ylabel(ylabel, fontsize=20, loc="top", labelpad=10)
     ax.tick_params(axis="both", which="both", labelsize=16)
 
@@ -1302,6 +1622,7 @@ def _plot_noise_vs_cell_area_rms(
     # mh.cms.label("Preliminary", data=True, ax=ax, loc=2)
     mh.cms.label(llabel='Preliminary', rlabel='', ax=ax, data=True, loc=2, fontsize=22)
     _add_full_cell_area_tag(ax, full_cell_area_mm2=full_cell_area_mm2, fontsize=15)
+    _add_run_type_tag(ax, run=cfg.run, fontsize=15)
 
     legend_handles, legend_labels = ax.get_legend_handles_labels()
     legend_handles.append(
@@ -1325,6 +1646,159 @@ def _plot_noise_vs_cell_area_rms(
     output_path = os.path.join(out_root, outfilename)
     fig.savefig(output_path)
     print(f"--> Plotted mean noise vs cell area: {output_path}")
+    plt.close(fig)
+
+
+def _plot_noise_model_component_vs_cell_area(
+    cfg: classes.AnalysisConfig,
+    column_tags: list[str],
+    out_root: str,
+    n_coherent: int,
+    component: str,
+    ylabel: str,
+    outfilename: str,
+    x_range: Optional[Tuple[float, float]] = None,
+    y_range: Optional[Tuple[float, float]] = None,
+) -> None:
+    os.makedirs(out_root, exist_ok=True)
+
+    if component not in ("coherent", "incoherent"):
+        raise ValueError(f"Unknown noise-model component '{component}'.")
+
+    mh.style.use('CMS')
+
+    tags_to_plot = [""]
+    for tag in column_tags:
+        if tag not in tags_to_plot:
+            tags_to_plot.append(tag)
+
+    cell_areas, cell_area_fractions = _load_cell_areas(cfg)
+    full_cell_area_mm2 = _full_cell_area_mm2(cell_areas, cell_area_fractions)
+    colors = ["black", "tab:blue", "tab:red", "tab:green", "tab:orange", "tab:purple"]
+    violin_width = _violin_width(cell_area_fractions[cell_area_fractions > 0.0])
+
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    prepared_curves = []
+    max_group_count = 0
+
+    for idx, column_tag in enumerate(tags_to_plot):
+        fit_tag = f"{column_tag}_nc{n_coherent}"
+        channels_filename = f"noise_model_channels_mm{fit_tag}.parquet"
+        channels_path = os.path.join(cfg.noise_model_fit_folder, channels_filename)
+        if not os.path.exists(channels_path):
+            print(f"[info] Skipping {component}-noise-vs-cell-area curve because fit file is missing: {channels_path}")
+            continue
+
+        channels = cfg.load_from_noise_model_fit_folder(channels_filename)
+        if component == "coherent":
+            values = np.sqrt(np.maximum(channels["coherent_var"].to_numpy(dtype=float), 0.0))
+        else:
+            if "incoherent_sigma" in channels.columns:
+                values = channels["incoherent_sigma"].to_numpy(dtype=float)
+            else:
+                values = np.sqrt(np.maximum(channels["incoherent_var"].to_numpy(dtype=float), 0.0))
+
+        valid = np.isfinite(cell_areas) & (cell_areas > 0.0) & np.isfinite(values)
+        if not np.any(valid):
+            print(f"[info] No valid channels available for {component}-noise-vs-cell-area curve: {column_tag or 'uncorrected'}")
+            continue
+
+        area_fractions_valid = cell_area_fractions[valid]
+        values_valid = values[valid]
+        unique_area_fractions = np.unique(area_fractions_valid)
+        grouped_values = [
+            values_valid[area_fractions_valid == area_fraction]
+            for area_fraction in unique_area_fractions
+        ]
+        group_counts = np.asarray([group.size for group in grouped_values], dtype=float)
+        if group_counts.size > 0:
+            max_group_count = max(max_group_count, int(np.max(group_counts)))
+
+        prepared_curves.append(
+            {
+                "x": unique_area_fractions,
+                "grouped_values": grouped_values,
+                "group_counts": group_counts,
+                "raw_x": area_fractions_valid,
+                "raw_y": values_valid,
+                "color": colors[idx % len(colors)],
+                "label": _column_tag_label(column_tag),
+            }
+        )
+
+    if not prepared_curves:
+        plt.close(fig)
+        print(f"[info] Skipping {component}-noise-vs-cell-area plot because no methods had valid inputs.")
+        return
+
+    width_norm = float(max_group_count) if max_group_count > 0 else 1.0
+
+    for curve in prepared_curves:
+        mean_values, sem_values = _group_mean_and_sem(curve["grouped_values"])
+        scaled_widths = violin_width * np.sqrt(curve["group_counts"] / width_norm)
+
+        # _add_violin_groups(
+        #     ax=ax,
+        #     x_positions=curve["x"],
+        #     grouped_values=curve["grouped_values"],
+        #     color=curve["color"],
+        #     widths=scaled_widths,
+        # )
+
+        ax.errorbar(
+            curve["x"],
+            mean_values,
+            yerr=sem_values,
+            fmt="o",
+            color=curve["color"],
+            linewidth=1.6,
+            markersize=5,
+            capsize=4,
+            label=curve["label"],
+        )
+        _add_quadratic_fit(
+            ax=ax,
+            x=curve["raw_x"],
+            y=curve["raw_y"],
+            color=curve["color"],
+            label=curve["label"],
+        )
+
+    ax.set_xlabel("Cell area / standard cell area", fontsize=20, loc="right", labelpad=8)
+    ax.set_ylabel(ylabel, fontsize=20, loc="top", labelpad=10)
+    ax.tick_params(axis="both", which="both", labelsize=16)
+
+    if x_range is not None:
+        ax.set_xlim(*x_range)
+    if y_range is not None:
+        ax.set_ylim(*y_range)
+
+    mh.cms.label(llabel='Preliminary', rlabel='', ax=ax, data=True, loc=2, fontsize=22)
+    _add_full_cell_area_tag(ax, full_cell_area_mm2=full_cell_area_mm2, fontsize=15)
+    _add_run_type_tag(ax, run=cfg.run, fontsize=15)
+
+    legend_handles, legend_labels = ax.get_legend_handles_labels()
+    legend_handles.append(
+        Line2D(
+            [0],
+            [0],
+            linestyle="--",
+            color="0.5",
+            linewidth=1.6,
+            alpha=0.9,
+            label="Quadratic fit",
+        )
+    )
+    legend_labels.append("Quadratic fit")
+    ax.legend(legend_handles, legend_labels, frameon=False, fontsize=15, loc="upper right")
+    if y_range is not None and y_range[1] < 5.:
+        fig.subplots_adjust(left=0.12, right=0.98, bottom=0.14, top=0.98)
+    else:
+        fig.subplots_adjust(left=0.08, right=0.98, bottom=0.14, top=0.98)
+
+    output_path = os.path.join(out_root, outfilename)
+    fig.savefig(output_path)
+    print(f"--> Plotted mean {component} noise vs cell area: {output_path}")
     plt.close(fig)
 
 
@@ -1449,6 +1923,7 @@ def _plot_mean_vs_cell_area(
         length=6,
     )
     _add_full_cell_area_tag(ax, full_cell_area_mm2=full_cell_area_mm2, fontsize=13)
+    _add_run_type_tag(ax, run=cfg.run, fontsize=13)
     legend_handles, legend_labels = ax.get_legend_handles_labels()
     # legend_handles.append(
     #     Line2D(
@@ -1484,7 +1959,7 @@ def plot_noise_vs_cell_area_window_rms(
         value_iterator=value_iterator,
         column_tags=column_tags,
         out_root=out_root,
-        window=(-10.0, 10.0),
+        window=utils.FOM_WINDOW,
         ylabel="Mean noise (ADC units)",
         outfilename="mean_noise_vs_cell_area_window_rms_overlay.pdf",
         x_range=x_range,
@@ -1505,9 +1980,51 @@ def plot_mean_vs_cell_area_window_mean(
         value_iterator=value_iterator,
         column_tags=column_tags,
         out_root=out_root,
-        window=(-10.0, 10.0),
-        ylabel="Mean ADC [-10, 10]",
+        window=utils.FOM_WINDOW,
+        ylabel=f"Mean ADC {utils.fom_window_label()}",
         outfilename="mean_adc_vs_cell_area_window_mean_overlay.pdf",
+        x_range=x_range,
+        y_range=y_range,
+    )
+
+
+def plot_noise_model_coherent_vs_cell_area(
+    cfg: classes.AnalysisConfig,
+    column_tags: list[str],
+    out_root: str,
+    n_coherent: int,
+    x_range: Optional[Tuple[float, float]] = None,
+    y_range: Optional[Tuple[float, float]] = None,
+) -> None:
+    _plot_noise_model_component_vs_cell_area(
+        cfg=cfg,
+        column_tags=column_tags,
+        out_root=out_root,
+        n_coherent=n_coherent,
+        component="coherent",
+        ylabel="Mean coherent noise (ADC units)",
+        outfilename=f"mean_coherent_noise_vs_cell_area_noise_model_nc{n_coherent}_overlay.pdf",
+        x_range=x_range,
+        y_range=y_range,
+    )
+
+
+def plot_noise_model_incoherent_vs_cell_area(
+    cfg: classes.AnalysisConfig,
+    column_tags: list[str],
+    out_root: str,
+    n_coherent: int,
+    x_range: Optional[Tuple[float, float]] = None,
+    y_range: Optional[Tuple[float, float]] = None,
+) -> None:
+    _plot_noise_model_component_vs_cell_area(
+        cfg=cfg,
+        column_tags=column_tags,
+        out_root=out_root,
+        n_coherent=n_coherent,
+        component="incoherent",
+        ylabel="Mean incoherent noise (ADC units)",
+        outfilename=f"mean_incoherent_noise_vs_cell_area_noise_model_nc{n_coherent}_overlay.pdf",
         x_range=x_range,
         y_range=y_range,
     )
@@ -1543,6 +2060,12 @@ def plot_summary_1d_multicol(varname_template: str, varname_true_template: str, 
         cols = [c for c in full_df.columns if fnmatch(c, varname_template)]
         cols_true = [c for c in full_df.columns if fnmatch(c, varname_true_template)]
         break
+    if not cols:
+        print(f"[WARNING] No columns found that match the template {varname_template}. Skipping 1D summary.")
+        return
+    if not cols_true:
+        print(f"[WARNING] No columns found that match the template {varname_true_template}. Skipping 1D summary.")
+        return
 
     hists = {c: Streaming1DHist(x_min=x_range[0], x_max=x_range[1], nbins_x=nbins_x) for c in cols}
     hists_true = {c: Streaming1DHist(x_min=x_range[0], x_max=x_range[1], nbins_x=nbins_x) for c in cols_true}
@@ -1615,7 +2138,7 @@ def plot_summary_1d_multicol(varname_template: str, varname_true_template: str, 
         means=[float(np.mean(means_window)), float(np.mean(means_true_window))],
         rmss=[float(np.sqrt(np.mean(means_window * means_window))), float(np.sqrt(np.mean(means_true_window * means_true_window)))],
         bins=mu_edges,
-        xlabel=f"{varname_template} mean [-10, 10]",
+        xlabel=f"{varname_template} mean {utils.fom_window_label()}",
         ylabel="Number of channels",
         title="",
         colors=["red", "gray"],
@@ -1641,7 +2164,7 @@ def plot_summary_1d_multicol(varname_template: str, varname_true_template: str, 
         means=[float(np.mean(sigmas_window)), float(np.mean(sigmas_true_window))],
         rmss=[float(np.sqrt(np.mean(sigmas_window * sigmas_window))), float(np.sqrt(np.mean(sigmas_true_window * sigmas_true_window)))],
         bins=sg_edges,
-        xlabel=f"{varname_template} RMS [-10, 10]",
+        xlabel=f"{varname_template} RMS {utils.fom_window_label()}",
         ylabel="Number of channels",
         title="",
         colors=["red", "gray"],
@@ -1651,7 +2174,7 @@ def plot_summary_1d_multicol(varname_template: str, varname_true_template: str, 
 
     utils.plot_hist_single_precomputed(x=rs_counts, mean=float(np.mean(ratio_sigmas)), rms=float(np.sqrt(np.mean(ratio_sigmas * ratio_sigmas))), bins=ds_edges, xlabel=f"σ (corr.) / σ (meas.)", ylabel="Number of channels", title="", color="red", outpath=os.path.join(out_root, f"{varname_template.replace('*','all').replace('?','')}_ratio_sigma.pdf"), show_mean_line=True)
 
-    utils.plot_hist_single_precomputed(x=rs_counts_window, mean=float(np.mean(ratio_sigmas_window)), rms=float(np.sqrt(np.mean(ratio_sigmas_window * ratio_sigmas_window))), bins=ds_edges, xlabel=f"σ (corr.) [-10, 10] / σ (meas.) [-10, 10]", ylabel="Number of channels", title="", color="red", outpath=os.path.join(out_root, f"{varname_template.replace('*','all').replace('?','')}_ratio_sigma_window.pdf"), show_mean_line=True)
+    utils.plot_hist_single_precomputed(x=rs_counts_window, mean=float(np.mean(ratio_sigmas_window)), rms=float(np.sqrt(np.mean(ratio_sigmas_window * ratio_sigmas_window))), bins=ds_edges, xlabel=f"σ (corr.) {utils.fom_window_label()} / σ (meas.) {utils.fom_window_label()}", ylabel="Number of channels", title="", color="red", outpath=os.path.join(out_root, f"{varname_template.replace('*','all').replace('?','')}_ratio_sigma_window.pdf"), show_mean_line=True)
 
     channel_indices = np.arange(len(means))
     plt.figure(figsize=(8,5))
@@ -1669,7 +2192,7 @@ def plot_summary_1d_multicol(varname_template: str, varname_true_template: str, 
     plt.plot(channel_indices, means_true_window, "-", label="Measured", color="gray")
     plt.plot(channel_indices, means_window, "-", label="Corrected", color="red")
     plt.xlabel("Channel index")
-    plt.ylabel("Mean [-10, 10]")
+    plt.ylabel(f"Mean {utils.fom_window_label()}")
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -1693,7 +2216,7 @@ def plot_summary_1d_multicol(varname_template: str, varname_true_template: str, 
     plt.plot(channel_indices, sigmas_true_window, "-", label="Measured", color="gray")
     plt.plot(channel_indices, sigmas_window, "-", label="Corrected", color="red")
     plt.xlabel("Channel index")
-    plt.ylabel("RMS [-10, 10]")
+    plt.ylabel(f"RMS {utils.fom_window_label()}")
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -1714,7 +2237,7 @@ def plot_summary_1d_multicol(varname_template: str, varname_true_template: str, 
     plt.figure(figsize=(8,5))
     plt.plot(channel_indices, ratio_sigmas_window, "-", color="red")
     plt.xlabel("Channel index")
-    plt.ylabel("σ (corr.) [-10, 10] / σ (meas.) [-10, 10]")
+    plt.ylabel(f"σ (corr.) {utils.fom_window_label()} / σ (meas.) {utils.fom_window_label()}")
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig(os.path.join(out_root, f"{varname_template.replace('*','all').replace('?','')}_ratio_sigma_window_vs_channel.pdf"))
@@ -1757,7 +2280,7 @@ def plot_gaussfit_summary_1d_multicol(varname_template: str, varname_true_templa
 
         # fit only bins with content > 0 (avoid tons of zeros dominating)
         mask = np.isfinite(x) & (x > 0)
-        xmin, xmax = (-10, 10)
+        xmin, xmax = utils.FOM_WINDOW
         mask &= (centers >= xmin) & (centers <= xmax)
         xc = centers[mask]
         yc = x[mask].astype(float)
@@ -1797,7 +2320,7 @@ def plot_gaussfit_summary_1d_multicol(varname_template: str, varname_true_templa
 
         # fit only bins with content > 0 (avoid tons of zeros dominating)
         mask = np.isfinite(x) & (x > 0)
-        xmin, xmax = (-10, 10)
+        xmin, xmax = utils.FOM_WINDOW
         mask &= (centers >= xmin) & (centers <= xmax)
         xc = centers[mask]
         yc = x[mask].astype(float)
@@ -2026,10 +2549,10 @@ def plot_eigenvalues(cfg, column_tag, out_root):
 def plot_eigenvectors(cfg, column_tag, top: int, out_root):
     os.makedirs(out_root, exist_ok=True)
 
-    # vals = cfg.load_from_cov_folder(filename=f"eigenvalues_mm{column_tag}.parquet")
-    # vecs = cfg.load_from_cov_folder(filename=f"eigenvectors_mm{column_tag}.parquet")
-    vals = cfg.load_from_cov_folder(filename=f"eigenvalues_mcmc{column_tag}.parquet")
-    vecs = cfg.load_from_cov_folder(filename=f"eigenvectors_mcmc{column_tag}.parquet")
+    vals = cfg.load_from_cov_folder(filename=f"eigenvalues_mm{column_tag}.parquet")
+    vecs = cfg.load_from_cov_folder(filename=f"eigenvectors_mm{column_tag}.parquet")
+    # vals = cfg.load_from_cov_folder(filename=f"eigenvalues_mcmc{column_tag}.parquet")
+    # vecs = cfg.load_from_cov_folder(filename=f"eigenvectors_mcmc{column_tag}.parquet")
 
     k = int(min(top, vecs.shape[1]))
 
@@ -2061,7 +2584,7 @@ def plot_loss(modeldir, plot_dir):
 
     # --- Load losses ---
     if not os.path.exists(f"{os.path.join(modeldir, 'train_losses.npy')}") or not os.path.exists(f"{os.path.join(modeldir, 'test_losses.npy')}"):
-        raise FileNotFoundError("Missing train_losses.npy or val_losses.npy.")
+        raise FileNotFoundError("Missing train_losses.npy or test_losses.npy.")
 
     train_losses = np.load(os.path.join(modeldir, 'train_losses.npy'))
     val_losses = np.load(os.path.join(modeldir, 'test_losses.npy'))

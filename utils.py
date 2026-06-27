@@ -18,6 +18,19 @@ from scipy.optimize import curve_fit  # type: ignore
 
 import classes
 
+FOM_WINDOW: Tuple[float, float] = (-10.0, 10.0)
+
+
+def fom_window_label() -> str:
+    xmin, xmax = FOM_WINDOW
+
+    def _fmt(x: float) -> str:
+        if float(x).is_integer():
+            return str(int(x))
+        return f"{x:g}"
+
+    return f"[{_fmt(xmin)}, {_fmt(xmax)}]"
+
 def count_parameters(model):
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -427,14 +440,14 @@ def plot_hist_single(x: np.ndarray, bins: Union[int, np.ndarray], color: str, xl
     plt.tight_layout()
     plt.savefig(outpath); plt.close()
 
-def plot_hist_single_precomputed(x: np.ndarray, mean: float, rms: float, bins: Union[int, np.ndarray], color: str, xlabel: str, title: str, outpath: str, show_mean_line: bool = True, ylabel="Number of channels", do_gauss_fit: bool=False, gauss_p0: Optional[Tuple[float, float, float]] = None, mean_window: float=None, rms_window: float=None) -> None:
+def plot_hist_single_precomputed(x: np.ndarray, mean: float, rms: float, bins: Union[int, np.ndarray], color: str, xlabel: str, title: str, outpath: str, show_mean_line: bool = True, ylabel="Number of channels", do_gauss_fit: bool=False, gauss_p0: Optional[Tuple[float, float, float]] = None, mean_window: float=None, rms_window: float=None, logy: bool=False) -> None:
     edges = np.histogram_bin_edges(x, bins=bins) if isinstance(bins, int) else bins
     plt.figure(figsize=(8, 5))
     plt.step(edges[:-1], x, where="mid", color=color)
     if show_mean_line:
         plt.axvline(mean, color="k", ls="-", label=f"mean = {mean:.3f}, rms = {rms:.3f}")
         if mean_window is not None and rms_window is not None:
-            plt.axvline(mean_window, color="k", ls="--", label=f"mean [-10, 10] = {mean_window:.3f}, rms [-10, 10] = {rms_window:.3f}")
+            plt.axvline(mean_window, color="k", ls="--", label=f"mean {fom_window_label()} = {mean_window:.3f}, rms {fom_window_label()} = {rms_window:.3f}")
 
     # --- Gaussian fit (minimal add-on) ---
     if do_gauss_fit:
@@ -444,7 +457,7 @@ def plot_hist_single_precomputed(x: np.ndarray, mean: float, rms: float, bins: U
 
         # fit only bins with content > 0 (avoid tons of zeros dominating)
         mask = np.isfinite(x) & (x > 0)
-        xmin, xmax = (-10, 10)
+        xmin, xmax = FOM_WINDOW
         mask &= (centers >= xmin) & (centers <= xmax)
         xc = centers[mask]
         yc = x[mask].astype(float)
@@ -477,7 +490,17 @@ def plot_hist_single_precomputed(x: np.ndarray, mean: float, rms: float, bins: U
         plt.legend()
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
-    plt.ylim(bottom=0.)
+    if logy:
+        positive = np.asarray(x)[np.isfinite(x) & (np.asarray(x) > 0.0)]
+        if positive.size > 0:
+            plt.yscale("log")
+            # plt.ylim(bottom=max(0.5, float(np.min(positive)) * 0.5))
+            plt.ylim(bottom=1., top=1e7)
+        else:
+            print(f"[WARNING] Requested log-y plot but histogram has no positive bins: {outpath}")
+            plt.ylim(bottom=0.)
+    else:
+        plt.ylim(bottom=0.)
     plt.title(title)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
