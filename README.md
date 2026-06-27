@@ -201,3 +201,17 @@ The baseline DNN can be selected by switching to:
 dnn_tag = ""
 dnn_preprocess_inputs = False
 ```
+
+DNN output columns include the resolved model tag so different DNN corrections can coexist in the same parquet files. The baseline DNN keeps the historical names:
+
+```text
+adc_ch000_pedsub_pred_dnn
+adc_ch000_pedsub_resid_dnn
+```
+
+A tagged/preprocessed DNN writes columns such as:
+
+```text
+adc_ch000_pedsub_pred_dnn_chunkshuffle_modulesummaries_targetspreproc_inputzscore
+adc_ch000_pedsub_resid_dnn_chunkshuffle_modulesummaries_targetspreproc_inputzscore
+```

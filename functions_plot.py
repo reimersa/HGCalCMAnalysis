@@ -1402,7 +1402,10 @@ def _column_tag_label(column_tag: str) -> str:
         return "No correction for CM"
     if column_tag == "_resid_analytic_k0":
         return "Analytic correction for CM"
-    if column_tag == "_resid_dnn":
+    if column_tag.startswith("_resid_dnn"):
+        dnn_tag = column_tag.removeprefix("_resid_dnn").strip("_")
+        if dnn_tag:
+            return f"DNN correction for CM ({dnn_tag})"
         return "DNN correction for CM"
     return column_tag.strip("_")
 

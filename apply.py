@@ -23,12 +23,9 @@ def main(args, parser):
     modulenames = ["ML_F3WC_IH0182"]
 
     # Selection used only for plots/evaluation on the target run.
-    # selection = "selection_full"
     selection = "selection_trigtime"
-    # selection = "selection_test_trigtime"
 
     # Selection that was used when the stored correction was derived.
-    # selection_for_correction = "selection_full"
     selection_for_correction = "selection_trigtime"
 
     # Target run to which already-derived corrections are applied.
@@ -36,8 +33,9 @@ def main(args, parser):
     # target_run = 112048
     # target_run = 1120480000
     # target_run = 11204800001
+    target_run = 112049
     # target_run = 112050
-    target_run = 112051
+    # target_run = 112051
     # target_run = 112060
     # target_run = 112068
     # target_run = 112078
@@ -64,7 +62,7 @@ def main(args, parser):
     dnn_dropout = 0.0
     dnn_infer_batch = 8192
 
-    # Baseline alternative:
+    # Baseline:
     # dnn_tag = ""
     # dnn_preprocess_inputs = False
 
@@ -72,10 +70,13 @@ def main(args, parser):
     dnn_tag = "chunkshuffle_modulesummaries_targetspreproc"
     dnn_preprocess_inputs = True
 
+    dnn_resolved_tag = add_correction_dnn.tag_with_input_preprocessing(dnn_tag, dnn_preprocess_inputs)
+    dnn_output_tag = add_correction_dnn.dnn_output_tag_from_model_tag(dnn_resolved_tag)
+
     method_column_tags = {
         "uncorrected": "",
         "analytic": "_resid_analytic_k0",
-        "dnn": "_resid_dnn",
+        "dnn": f"_resid{dnn_output_tag}",
     }
 
     if args.show or not any_step_requested(args):
@@ -92,6 +93,8 @@ def main(args, parser):
             per_channel_cols=per_channel_cols,
             dnn_tag=dnn_tag,
             dnn_preprocess_inputs=dnn_preprocess_inputs,
+            dnn_resolved_tag=dnn_resolved_tag,
+            dnn_output_tag=dnn_output_tag,
         )
         return
 
@@ -138,7 +141,7 @@ def main(args, parser):
                         column_tag="",
                         per_channel_cols=per_channel_cols,
                         infer_batch=dnn_infer_batch,
-                        plot_dir_loss=os.path.join(cfg.plotfolder_base, selection, "dnn_loss"),
+                        plot_dir_loss=dnn_loss_plot_folder(cfg=cfg, selection=selection, dnn_output_tag=dnn_output_tag),
                         preprocess_inputs=dnn_preprocess_inputs,
                     )
                     inferencer = make_full_inferencer(cfg)
@@ -200,6 +203,8 @@ def print_setup(
     per_channel_cols,
     dnn_tag,
     dnn_preprocess_inputs,
+    dnn_resolved_tag,
+    dnn_output_tag,
 ) -> None:
     print("apply.py setup:")
     print(f"  modules: {modulenames}")
@@ -213,6 +218,8 @@ def print_setup(
     print(f"  per_channel_cols: {per_channel_cols}")
     print(f"  dnn_tag: {dnn_tag}")
     print(f"  dnn_preprocess_inputs: {dnn_preprocess_inputs}")
+    print(f"  dnn_resolved_tag: {dnn_resolved_tag}")
+    print(f"  dnn_output_tag: {dnn_output_tag}")
     print("")
     print(parser.format_help().rstrip())
 
@@ -314,6 +321,13 @@ def add_projection(cfg, inferencer, column_tag) -> None:
         column_tag=column_tag,
         k=0,
     )
+
+
+def dnn_loss_plot_folder(cfg, selection, dnn_output_tag) -> str:
+    base = os.path.join(cfg.plotfolder_base, selection, "dnn_loss")
+    if dnn_output_tag == "_dnn":
+        return base
+    return os.path.join(base, dnn_output_tag.strip("_"))
 
 
 def make_summary_plots(cfg, inferencer_sel, selection, column_tags, n_coherent_noise_model) -> None:

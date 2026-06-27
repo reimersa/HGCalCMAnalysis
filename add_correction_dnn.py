@@ -65,7 +65,7 @@ def main():
         "--column-tag",
         type=str,
         default="",
-        help="Input ADC column tag appended after 'adc_ch{i:03d}_pedsub'. Outputs are written as *_pred_dnn and *_resid_dnn.",
+        help="Input ADC column tag appended after 'adc_ch{i:03d}_pedsub'. DNN output columns use the resolved model tag.",
     )
 
     # inputs definition
@@ -124,6 +124,10 @@ def tag_with_input_preprocessing(tag: str, preprocess_inputs: bool) -> str:
     if INPUT_PREPROCESSING_TAG in tag.split("_"):
         return tag
     return f"{tag}_{INPUT_PREPROCESSING_TAG}" if tag else INPUT_PREPROCESSING_TAG
+
+
+def dnn_output_tag_from_model_tag(tag: str) -> str:
+    return "_dnn" if tag == "" else f"_dnn_{tag}"
 
 
 def load_input_preprocessing(modeldir: str, feature_names: list[str]):
@@ -200,10 +204,14 @@ def add_correction_dnn(cfg, inferencer, nodes: list[int], dropout: float, tag: s
     print("Hello from add_correction_dnn()!")
     print(f"Loading checkpoint: {cfg.dnn_models_folder}")
     tag = tag_with_input_preprocessing(tag, preprocess_inputs)
+    dnn_output_tag = dnn_output_tag_from_model_tag(tag)
+    pred_suffix = f"_pred{dnn_output_tag}"
+    resid_suffix = f"_resid{dnn_output_tag}"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     print(f"DNN apply preprocess_inputs={preprocess_inputs}")
+    print(f"DNN apply resolved tag={tag!r}, output tag={dnn_output_tag!r}")
 
     columns_to_predict = [f"adc_ch{i:03d}_pedsub{column_tag}" for i in range(cfg.nch)]
     adc_channel_indices = [x for x in range(cfg.nch)]
@@ -276,8 +284,8 @@ def add_correction_dnn(cfg, inferencer, nodes: list[int], dropout: float, tag: s
         meas = df_chunk[columns_to_predict].to_numpy(np.float32, copy=False)
         resids = (meas - preds).astype(np.float32, copy=False)
 
-        preds_df = pd.DataFrame(preds, index=df_chunk.index, columns=columns_to_predict).add_suffix(f"_pred_dnn")
-        resids_df = pd.DataFrame(resids, index=df_chunk.index, columns=columns_to_predict).add_suffix(f"_resid_dnn")
+        preds_df = pd.DataFrame(preds, index=df_chunk.index, columns=columns_to_predict).add_suffix(pred_suffix)
+        resids_df = pd.DataFrame(resids, index=df_chunk.index, columns=columns_to_predict).add_suffix(resid_suffix)
 
         # drop old columns if present
         existing_cols = list(preds_df.columns) + list(resids_df.columns)
@@ -287,8 +295,8 @@ def add_correction_dnn(cfg, inferencer, nodes: list[int], dropout: float, tag: s
 
         frames = [df_chunk, preds_df, resids_df]
         df_chunk = pd.concat(frames, axis=1)
-        df_chunk[f"adc_sum_pedsub{column_tag}_pred_dnn"] = df_chunk[[f"{x}_pred_dnn" for x in columns_to_predict]].sum(axis=1, skipna=True)
-        df_chunk[f"adc_sum_pedsub{column_tag}_resid_dnn"] = df_chunk[[f"{x}_resid_dnn" for x in columns_to_predict]].sum(axis=1, skipna=True)
+        df_chunk[f"adc_sum_pedsub{column_tag}{pred_suffix}"] = df_chunk[[f"{x}{pred_suffix}" for x in columns_to_predict]].sum(axis=1, skipna=True)
+        df_chunk[f"adc_sum_pedsub{column_tag}{resid_suffix}"] = df_chunk[[f"{x}{resid_suffix}" for x in columns_to_predict]].sum(axis=1, skipna=True)
 
         outfilename = os.path.join(cfg.analysis_inputs_folder, f"df_batch{idx:03d}.parquet")
         utils.write_via_tmpdir(
