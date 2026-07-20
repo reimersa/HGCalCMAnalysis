@@ -55,7 +55,8 @@ def fill_wafer_hist(ch_values,moduletype='ML_L'):
     hex_plot.SetOption('COLZ') # draw with color bar by default
     hex_plot.GetXaxis().SetTitle("x [cm]")
     hex_plot.GetYaxis().SetTitle("y [cm]")
-    file = ROOT.TFile.Open(f'geometry_{moduletype}_wafer.root','R')
+    current_dir = os.path.abspath(os.path.join(os.path.dirname(__file__)))
+    file = ROOT.TFile.Open(os.path.join(current_dir, f'geometry_{moduletype}_wafer.root','R'))
     iobj = 0
     for key in file.GetListOfKeys():
       obj = key.ReadObj()
