@@ -10,8 +10,8 @@ import ROOT
 
 
 def _load_wafer_module():
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    wafer_path = os.path.join(repo_root, "python", "plot", "wafer.py")
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__)))
+    wafer_path = os.path.join(repo_root, "data", "wafer.py")
     spec = importlib.util.spec_from_file_location("localcalibration_wafer", wafer_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not load wafer module from {wafer_path}")
@@ -21,8 +21,8 @@ def _load_wafer_module():
 
 
 def _get_wafer_centers(nchans: int, moduletype: str):
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    fname = os.path.join(repo_root, "..", "DQM", "data", f"geometry_{moduletype}_wafer.root")
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__)))
+    fname = os.path.join(repo_root, "data", f"geometry_{moduletype}_wafer.root")
     file = ROOT.TFile.Open(fname, "READ")
     if not file:
         raise RuntimeError(f"Could not open wafer geometry file {fname}")
