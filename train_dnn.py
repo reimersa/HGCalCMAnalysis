@@ -13,6 +13,7 @@ from tqdm import tqdm  # type: ignore
 import classes
 import dnn_models
 import inferencers
+import prepare_dnn_inputs
 import utils
 
 
@@ -31,14 +32,42 @@ defaults = {
     "weight_decay": 0.0,
     "sample_weighting": "none",
     "preprocess_inputs": False,
+    "feature_version": prepare_dnn_inputs.FEATURE_VERSION_LEGACY,
+    "train_frac": 1.0,
+    "val_frac": 1.0,
 }
 
 INPUT_PREPROCESSING_TAG = "inputzscore"
 INPUT_PREPROCESSING_FILENAME = "input_preprocessing.json"
+MODEL_MANIFEST_FILENAME = "model_manifest.json"
 
 
 def parse_run_arg(value: str):
     return int(value) if str(value).isdigit() else value
+
+
+def parse_module_fraction(value: str):
+    try:
+        module, fraction = value.rsplit("=", 1)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("Expected MODULE=FRACTION.") from error
+    if not module:
+        raise argparse.ArgumentTypeError("Module name cannot be empty.")
+    try:
+        fraction = inferencers.validate_event_fraction(float(fraction))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    return module, fraction
+
+
+def make_event_fraction_map(modules, default_fraction=1.0, overrides=None):
+    default_fraction = inferencers.validate_event_fraction(default_fraction)
+    fractions = {module: default_fraction for module in modules}
+    for module, fraction in overrides or []:
+        if module not in fractions:
+            raise ValueError(f"Event fraction supplied for module not in training set: {module!r}.")
+        fractions[module] = inferencers.validate_event_fraction(fraction)
+    return fractions
 
 
 def format_weight_decay_tag(weight_decay: float) -> str:
@@ -127,6 +156,21 @@ def main():
         default=defaults["preprocess_inputs"],
         help="Z-score DNN input features and per-channel targets using train-split statistics.",
     )
+    p.add_argument(
+        "--combine-modules",
+        action="store_true",
+        help="Train one DNN from all modules passed with --modules.",
+    )
+    p.add_argument(
+        "--feature-version",
+        choices=sorted(prepare_dnn_inputs.SUPPORTED_FEATURE_VERSIONS),
+        default=defaults["feature_version"],
+        help="Prepared-input feature schema to train.",
+    )
+    p.add_argument("--train-frac", type=float, default=defaults["train_frac"], help="Default fraction of train-split events retained from each module.")
+    p.add_argument("--val-frac", type=float, default=defaults["val_frac"], help="Default fraction of validation-split events retained from each module.")
+    p.add_argument("--module-train-frac", action="append", type=parse_module_fraction, default=[], metavar="MODULE=FRACTION", help="Override --train-frac for one module; repeat as needed.")
+    p.add_argument("--module-val-frac", action="append", type=parse_module_fraction, default=[], metavar="MODULE=FRACTION", help="Override --val-frac for one module; repeat as needed.")
 
     # tell inferencer which columns are per-channel list-columns
     p.add_argument(
@@ -150,15 +194,90 @@ def main():
         for x in args.modules
     ]
 
-    for cfg in cfgs:
-        train_dnn(cfg=cfg, noprogbar=args.noprogbar, per_channel_cols=args.per_channel_cols, nodes=args.nodes, dropout=args.dropout, tag=args.tag, override_name=args.override_name, new_name=args.new_name, batch_samples=args.batch_samples, epochs=args.epochs, shuffle_mode=args.shuffle_mode, shuffle_buffer_samples=args.shuffle_buffer_samples, shuffle_buffer_chunks=args.shuffle_buffer_chunks, exclude_unconnected_targets=args.exclude_unconnected_targets, weight_decay=args.weight_decay, sample_weighting=args.sample_weighting, preprocess_inputs=args.preprocess_inputs)
+    feature_spec = prepare_dnn_inputs.make_feature_spec(
+        feature_version=args.feature_version,
+        module_vocabulary=args.modules,
+    )
+    try:
+        train_event_fractions = make_event_fraction_map(
+            args.modules, args.train_frac, args.module_train_frac
+        )
+        validation_event_fractions = make_event_fraction_map(
+            args.modules, args.val_frac, args.module_val_frac
+        )
+    except ValueError as error:
+        p.error(str(error))
+    if (
+        args.feature_version == prepare_dnn_inputs.FEATURE_VERSION_ALL_CHANNELS
+        and len(args.modules) > 1
+        and not args.combine_modules
+    ):
+        p.error("The multi-module all-channel schema requires --combine-modules when more than one module is listed.")
+    if args.combine_modules:
+        model_group = f"MULTI_{'_'.join(args.modules)}"
+        cfg_out = classes.AnalysisConfig(
+            modulename=args.modules[0],
+            run=args.run,
+            run_for_pedestal=args.pedestal_run,
+            run_for_correction=args.run,
+            module_for_correction=model_group,
+            selection_for_correction=args.selection_for_correction,
+            standardize_std=False,
+            inputfoldertag="",
+        )
+        train_dnn(
+            cfg=cfgs,
+            cfg_out=cfg_out,
+            noprogbar=args.noprogbar,
+            per_channel_cols=args.per_channel_cols,
+            nodes=args.nodes,
+            dropout=args.dropout,
+            tag=args.tag,
+            override_name=args.override_name,
+            new_name=args.new_name,
+            batch_samples=args.batch_samples,
+            epochs=args.epochs,
+            shuffle_mode=args.shuffle_mode,
+            shuffle_buffer_samples=args.shuffle_buffer_samples,
+            shuffle_buffer_chunks=args.shuffle_buffer_chunks,
+            exclude_unconnected_targets=args.exclude_unconnected_targets,
+            weight_decay=args.weight_decay,
+            sample_weighting=args.sample_weighting,
+            preprocess_inputs=args.preprocess_inputs,
+            feature_spec=feature_spec,
+            train_event_fractions=train_event_fractions,
+            validation_event_fractions=validation_event_fractions,
+        )
+    else:
+        for cfg in cfgs:
+            single_spec = prepare_dnn_inputs.make_feature_spec(
+                feature_version=args.feature_version,
+                module_vocabulary=[cfg.modulename],
+            )
+            train_dnn(cfg=cfg, noprogbar=args.noprogbar, per_channel_cols=args.per_channel_cols, nodes=args.nodes, dropout=args.dropout, tag=args.tag, override_name=args.override_name, new_name=args.new_name, batch_samples=args.batch_samples, epochs=args.epochs, shuffle_mode=args.shuffle_mode, shuffle_buffer_samples=args.shuffle_buffer_samples, shuffle_buffer_chunks=args.shuffle_buffer_chunks, exclude_unconnected_targets=args.exclude_unconnected_targets, weight_decay=args.weight_decay, sample_weighting=args.sample_weighting, preprocess_inputs=args.preprocess_inputs, feature_spec=single_spec, train_event_fractions={cfg.modulename: train_event_fractions[cfg.modulename]}, validation_event_fractions={cfg.modulename: validation_event_fractions[cfg.modulename]})
 
 
 
 
-def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_samples, epochs, override_name=False, new_name="TESTTEST", shuffle_mode: str = defaults["shuffle_mode"], shuffle_buffer_samples: int = defaults["shuffle_buffer_samples"], shuffle_buffer_chunks: int = defaults["shuffle_buffer_chunks"], exclude_unconnected_targets: bool = defaults["exclude_unconnected_targets"], weight_decay: float = defaults["weight_decay"], sample_weighting: str = defaults["sample_weighting"], preprocess_inputs: bool = defaults["preprocess_inputs"]) -> None:
+def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_samples, epochs, override_name=False, new_name="TESTTEST", cfg_out=None, shuffle_mode: str = defaults["shuffle_mode"], shuffle_buffer_samples: int = defaults["shuffle_buffer_samples"], shuffle_buffer_chunks: int = defaults["shuffle_buffer_chunks"], exclude_unconnected_targets: bool = defaults["exclude_unconnected_targets"], weight_decay: float = defaults["weight_decay"], sample_weighting: str = defaults["sample_weighting"], preprocess_inputs: bool = defaults["preprocess_inputs"], feature_spec=None, train_event_fractions=None, validation_event_fractions=None) -> None:
     if sample_weighting not in ("none", "source_run_channel"):
         raise ValueError("sample_weighting must be 'none' or 'source_run_channel'.")
+    cfgs = list(cfg) if isinstance(cfg, (list, tuple)) else [cfg]
+    if not cfgs:
+        raise ValueError("DNN training requires at least one module configuration.")
+    cfg_out = cfgs[0] if cfg_out is None else cfg_out
+    feature_spec = feature_spec or prepare_dnn_inputs.make_feature_spec()
+    for item in cfgs:
+        prepare_dnn_inputs.configure_dnn_input_folder(
+            cfg=item,
+            feature_spec=feature_spec,
+            allow_legacy_fallback=True,
+        )
+    module_names = [item.modulename for item in cfgs]
+    train_event_fractions = make_event_fraction_map(module_names, overrides=(train_event_fractions or {}).items())
+    validation_event_fractions = make_event_fraction_map(module_names, overrides=(validation_event_fractions or {}).items())
+    validate_prepared_input_manifests(cfgs=cfgs, feature_spec=feature_spec)
+
     show_progbar = not noprogbar
     tag = tag_with_input_preprocessing(tag, preprocess_inputs)
     tag = tag_with_weight_decay(tag, weight_decay)
@@ -171,12 +290,42 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
     print(f"DNN training weight_decay={weight_decay}, tag={tag}")
     print(f"DNN training sample_weighting={sample_weighting}")
     print(f"DNN training preprocess_inputs={preprocess_inputs}")
-    exclude_target_channels = cfg.unconnected_channels if exclude_unconnected_targets else None
+    print(f"DNN training event fractions={train_event_fractions}")
+    print(f"DNN validation event fractions={validation_event_fractions}")
+    exclude_target_channels = cfgs[0].unconnected_channels if exclude_unconnected_targets else None
     if exclude_target_channels:
         print(f"Excluding {len(exclude_target_channels)} unconnected channel(s) from DNN train/test targets.")
 
-    train_inferencer = inferencers.AnalysisDNNInferencer(cfg=cfg, split="train", per_channel_cols=per_channel_cols, require_weights=use_sample_weights)
-    test_inferencer  = inferencers.AnalysisDNNInferencer(cfg=cfg, split="test", per_channel_cols=per_channel_cols, require_weights=use_sample_weights)
+    if len(cfgs) > 1:
+        train_inferencer = inferencers.CombinedAnalysisDNNInferencer(
+            cfgs=cfgs,
+            split="train",
+            per_channel_cols=per_channel_cols,
+            require_weights=use_sample_weights,
+            event_fractions=train_event_fractions,
+        )
+        test_inferencer = inferencers.CombinedAnalysisDNNInferencer(
+            cfgs=cfgs,
+            split="test",
+            per_channel_cols=per_channel_cols,
+            require_weights=use_sample_weights,
+            event_fractions=validation_event_fractions,
+        )
+    else:
+        train_inferencer = inferencers.AnalysisDNNInferencer(
+            cfg=cfgs[0],
+            split="train",
+            per_channel_cols=per_channel_cols,
+            require_weights=use_sample_weights,
+            event_fraction=train_event_fractions[cfgs[0].modulename],
+        )
+        test_inferencer = inferencers.AnalysisDNNInferencer(
+            cfg=cfgs[0],
+            split="test",
+            per_channel_cols=per_channel_cols,
+            require_weights=use_sample_weights,
+            event_fraction=validation_event_fractions[cfgs[0].modulename],
+        )
 
     # Probe one batch to determine the model input shape.
     input_dim, feature_names = infer_input_dim_and_feature_names(
@@ -210,11 +359,24 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Model: {model.get_model_string()} ({n_params:,} trainable params)")
 
-    modelfolder = os.path.join(cfg.dnn_models_folder, model.get_model_string())
+    modelfolder = os.path.join(cfg_out.dnn_models_folder, model.get_model_string())
     os.makedirs(modelfolder, exist_ok=False)
     print(f"Writing outputs to: {modelfolder}")
     if input_preprocessing is not None:
         save_input_preprocessing(modelfolder=modelfolder, input_preprocessing=input_preprocessing)
+    save_model_manifest(
+        modelfolder=modelfolder,
+        feature_spec=feature_spec,
+        cfgs=cfgs,
+        feature_names=feature_names,
+        per_channel_cols=per_channel_cols,
+        nodes=nodes,
+        dropout=dropout,
+        tag=tag,
+        preprocess_inputs=preprocess_inputs,
+        train_event_fractions=train_event_fractions,
+        validation_event_fractions=validation_event_fractions,
+    )
 
     # Optimizer and LR schedule.
     # optimizer = torch.optim.Adam(model.parameters(), lr=float(1e-3))
@@ -224,12 +386,12 @@ def train_dnn(cfg, noprogbar, per_channel_cols, nodes, dropout, tag, batch_sampl
     # Sample counts are only used for progress bars.
     if show_progbar:
         if exclude_target_channels:
-            nch_supervised = cfg.nch - len(set(exclude_target_channels))
+            nch_supervised = cfgs[0].nch - len(set(exclude_target_channels))
             n_train = count_samples(train_inferencer, nch_per_event=nch_supervised)
             n_test = count_samples(test_inferencer, nch_per_event=nch_supervised)
         else:
-            n_train = count_samples(train_inferencer, nch_per_event=cfg.nch)
-            n_test = count_samples(test_inferencer, nch_per_event=cfg.nch)
+            n_train = count_samples(train_inferencer, nch_per_event=cfgs[0].nch)
+            n_test = count_samples(test_inferencer, nch_per_event=cfgs[0].nch)
         print(f"Total samples: train={n_train}, test={n_test}")
 
     train_losses: list[float] = []
@@ -330,6 +492,84 @@ def build_model(input_dim: int, nodes, dropout, tag, override_name=False, new_na
     if override_name:
         model.override_model_string(new_name)
     return model
+
+
+def validate_prepared_input_manifests(cfgs, feature_spec) -> None:
+    expected_version = feature_spec["feature_version"]
+    expected_modules = list(feature_spec["module_vocabulary"])
+    for cfg in cfgs:
+        path = os.path.join(
+            cfg.dnn_training_input_folder,
+            prepare_dnn_inputs.DNN_INPUT_MANIFEST_FILENAME,
+        )
+        if not os.path.exists(path):
+            if expected_version == prepare_dnn_inputs.FEATURE_VERSION_LEGACY:
+                continue
+            raise FileNotFoundError(
+                f"Missing prepared-input manifest {path}. Regenerate DNN inputs "
+                f"with --feature-version {expected_version}."
+            )
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if payload.get("feature_version") != expected_version:
+            raise ValueError(
+                f"DNN feature-version mismatch in {path}: "
+                f"found {payload.get('feature_version')!r}, expected {expected_version!r}."
+            )
+        if expected_version == prepare_dnn_inputs.FEATURE_VERSION_ALL_CHANNELS:
+            if list(payload.get("module_vocabulary", [])) != expected_modules:
+                raise ValueError(
+                    f"DNN module-vocabulary mismatch in {path}: "
+                    f"found {payload.get('module_vocabulary')}, expected {expected_modules}."
+                )
+            if payload.get("unknown_module_index") != len(expected_modules):
+                raise ValueError(f"Invalid reserved UNKNOWN module index in {path}.")
+        if int(payload.get("nch", cfg.nch)) != cfg.nch:
+            raise ValueError(f"DNN channel-count mismatch in {path}.")
+
+
+def save_model_manifest(
+    modelfolder,
+    feature_spec,
+    cfgs,
+    feature_names,
+    per_channel_cols,
+    nodes,
+    dropout,
+    tag,
+    preprocess_inputs,
+    train_event_fractions,
+    validation_event_fractions,
+) -> None:
+    payload = dict(feature_spec)
+    payload.update(
+        {
+            "training_modules": [cfg.modulename for cfg in cfgs],
+            "nch": cfgs[0].nch,
+            "feature_names": list(feature_names) if feature_names is not None else None,
+            "per_channel_columns": list(per_channel_cols),
+            "nodes_per_layer": [int(value) for value in nodes],
+            "dropout_rate": float(dropout),
+            "model_tag": tag,
+            "preprocess_inputs": bool(preprocess_inputs),
+            "unknown_module_training": "reserved_onehot_never_active",
+            "train_event_fractions": dict(train_event_fractions),
+            "validation_event_fractions": dict(validation_event_fractions),
+        }
+    )
+
+    def write_json(path):
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+
+    path = os.path.join(modelfolder, MODEL_MANIFEST_FILENAME)
+    utils.write_via_tmpdir(
+        outfilename=path,
+        suffix=".json",
+        writer_fn=write_json,
+    )
+    print(f"Wrote DNN model manifest to {path}")
 
 
 def infer_input_dim_and_feature_names(train_inferencer, batch_samples, per_channel_cols):

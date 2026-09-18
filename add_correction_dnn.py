@@ -3,6 +3,8 @@
 import argparse
 import os
 import json
+import re
+from glob import glob
 
 import numpy as np  # type: ignore
 import pandas as pd  # type: ignore
@@ -17,6 +19,7 @@ import utils
 
 INPUT_PREPROCESSING_TAG = "inputzscore"
 INPUT_PREPROCESSING_FILENAME = "input_preprocessing.json"
+MODEL_MANIFEST_FILENAME = "model_manifest.json"
 
 
 def main():
@@ -96,7 +99,11 @@ def main():
         required=True,
         help="Folder to save loss plots to.",
     )
-
+    parser.add_argument(
+        "--plot-inputs",
+        action="store_true",
+        help="Plot the full distribution of every feature actually passed to the DNN.",
+    )
     args = parser.parse_args()
 
     cfgs = [
@@ -115,7 +122,20 @@ def main():
 
     for cfg in cfgs:
         inferencer = inferencers.AnalysisTruthInferencer(cfg=cfg)
-        add_correction_dnn(cfg=cfg, inferencer=inferencer, nodes=args.nodes, dropout=args.dropout, tag=args.tag, column_tag=args.column_tag, per_channel_cols=args.per_channel_cols, infer_batch=args.infer_batch, plot_dir_loss=args.plotfolder, preprocess_inputs=args.preprocess_inputs)
+        add_correction_dnn(
+            cfg=cfg,
+            inferencer=inferencer,
+            nodes=args.nodes,
+            dropout=args.dropout,
+            tag=args.tag,
+            column_tag=args.column_tag,
+            per_channel_cols=args.per_channel_cols,
+            infer_batch=args.infer_batch,
+            plot_dir_loss=args.plotfolder,
+            preprocess_inputs=args.preprocess_inputs,
+            plot_inputs=args.plot_inputs,
+            plot_dir_inputs=os.path.join(args.plotfolder, "dnn_inputs_apply"),
+        )
 
 
 def tag_with_input_preprocessing(tag: str, preprocess_inputs: bool) -> str:
@@ -200,7 +220,180 @@ def inverse_target_preprocessing(y_np: np.ndarray, channel_idx: int, input_prepr
     return (y_np * target_std[channel_idx] + target_mean[channel_idx]).astype(np.float32, copy=False)
 
 
-def add_correction_dnn(cfg, inferencer, nodes: list[int], dropout: float, tag: str, column_tag: str, per_channel_cols: list[str], infer_batch: int, plot_dir_loss: str, preprocess_inputs: bool = False) -> None:
+class StreamingDNNInputPlotter:
+    def __init__(self, feature_names: list[str], plot_dir: str, bins: int = 100):
+        if bins <= 0:
+            raise ValueError(f"Input histogram bin count must be positive, got {bins}.")
+        self.feature_names = list(feature_names)
+        self.plot_dir = plot_dir
+        self.bins = bins
+        n_features = len(self.feature_names)
+        self.minimum = np.full(n_features, np.inf, dtype=np.float64)
+        self.maximum = np.full(n_features, -np.inf, dtype=np.float64)
+        self.count = np.zeros(n_features, dtype=np.int64)
+        self.nonfinite = np.zeros(n_features, dtype=np.int64)
+        self.sum = np.zeros(n_features, dtype=np.float64)
+        self.sum2 = np.zeros(n_features, dtype=np.float64)
+        self.edges = None
+        self.histograms = None
+
+    def _validate(self, values: np.ndarray) -> np.ndarray:
+        values = np.asarray(values, dtype=np.float64)
+        if values.ndim != 2 or values.shape[1] != len(self.feature_names):
+            raise ValueError(
+                f"Expected DNN input matrix [N,{len(self.feature_names)}], got {values.shape}."
+            )
+        return values
+
+    def observe_range(self, values: np.ndarray) -> None:
+        values = self._validate(values)
+        for feature_index in range(values.shape[1]):
+            column = values[:, feature_index]
+            finite_values = column[np.isfinite(column)]
+            self.nonfinite[feature_index] += column.size - finite_values.size
+            if finite_values.size == 0:
+                continue
+            self.minimum[feature_index] = min(self.minimum[feature_index], float(finite_values.min()))
+            self.maximum[feature_index] = max(self.maximum[feature_index], float(finite_values.max()))
+            self.count[feature_index] += finite_values.size
+            self.sum[feature_index] += finite_values.sum(dtype=np.float64)
+            self.sum2[feature_index] += np.square(finite_values).sum(dtype=np.float64)
+
+    def finalize_ranges(self) -> None:
+        self.edges = []
+        self.histograms = []
+        for feature_index in range(len(self.feature_names)):
+            if self.count[feature_index] == 0:
+                self.edges.append(None)
+                self.histograms.append(None)
+                continue
+            minimum = self.minimum[feature_index]
+            maximum = self.maximum[feature_index]
+            if minimum == maximum:
+                padding = max(0.5, abs(minimum) * 0.05)
+                feature_edges = np.asarray([minimum - padding, maximum + padding], dtype=np.float64)
+            else:
+                feature_edges = np.linspace(minimum, maximum, self.bins + 1, dtype=np.float64)
+            self.edges.append(feature_edges)
+            self.histograms.append(np.zeros(len(feature_edges) - 1, dtype=np.int64))
+
+    def fill(self, values: np.ndarray) -> None:
+        if self.edges is None or self.histograms is None:
+            raise RuntimeError("Call finalize_ranges() before filling DNN input histograms.")
+        values = self._validate(values)
+        for feature_index, feature_edges in enumerate(self.edges):
+            if feature_edges is None:
+                continue
+            column = values[:, feature_index]
+            finite_values = column[np.isfinite(column)]
+            if finite_values.size:
+                self.histograms[feature_index] += np.histogram(finite_values, bins=feature_edges)[0]
+
+    def write(self) -> None:
+        import matplotlib.pyplot as plt  # type: ignore
+
+        if self.edges is None or self.histograms is None:
+            raise RuntimeError("Cannot write DNN input plots before histogram filling.")
+        os.makedirs(self.plot_dir, exist_ok=True)
+        for feature_index, name in enumerate(self.feature_names):
+            safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_")
+            output_path = os.path.join(self.plot_dir, f"{feature_index:02d}_{safe_name}.pdf")
+            fig, ax = plt.subplots(figsize=(7.0, 5.0))
+            feature_edges = self.edges[feature_index]
+            histogram = self.histograms[feature_index]
+            if feature_edges is not None:
+                ax.bar(
+                    feature_edges[:-1],
+                    histogram,
+                    width=np.diff(feature_edges),
+                    align="edge",
+                    color="tab:blue",
+                    alpha=0.8,
+                )
+                mean = self.sum[feature_index] / self.count[feature_index]
+                variance = max(self.sum2[feature_index] / self.count[feature_index] - mean * mean, 0.0)
+                summary = (
+                    f"finite entries: {self.count[feature_index]:,}\n"
+                    f"non-finite entries: {self.nonfinite[feature_index]:,}\n"
+                    f"mean: {mean:.6g}\n"
+                    f"std: {np.sqrt(variance):.6g}\n"
+                    f"range: [{self.minimum[feature_index]:.6g}, {self.maximum[feature_index]:.6g}]"
+                )
+            else:
+                summary = f"finite entries: 0\nnon-finite entries: {self.nonfinite[feature_index]:,}"
+                ax.text(0.5, 0.5, "No finite values", ha="center", va="center", transform=ax.transAxes)
+            ax.text(
+                0.98,
+                0.98,
+                summary,
+                ha="right",
+                va="top",
+                transform=ax.transAxes,
+                fontsize=9,
+                bbox={"facecolor": "white", "edgecolor": "0.8", "alpha": 0.9},
+            )
+            ax.set_title(f"DNN input {feature_index}: {name}")
+            ax.set_xlabel(name)
+            ax.set_ylabel("Event-channel entries")
+            ax.grid(axis="y", alpha=0.25)
+            fig.tight_layout()
+            fig.savefig(output_path)
+            plt.close(fig)
+            print(f"Wrote applied DNN input plot: {output_path}")
+
+
+def iter_feature_matrices(df_inputs, per_event_cols, per_channel_cols, nch):
+    x_evt = df_inputs[per_event_cols].to_numpy(np.float32, copy=False)
+    allch_col_idx = inferencers.adc_allch_col_indices(per_event_cols, nch)
+    ch_mats = inferencers.matrices_from_per_channel_cols(
+        per_channel_cols=per_channel_cols,
+        df=df_inputs,
+        nch=nch,
+    )
+    for channel_index in range(nch):
+        ch_feats = [ch_mats[column][:, channel_index][:, None] for column in per_channel_cols]
+        x_evt_target = x_evt
+        if allch_col_idx is not None:
+            x_evt_target = x_evt.copy()
+            x_evt_target[:, allch_col_idx[channel_index]] = np.float32(0.0)
+        values = np.concatenate([x_evt_target] + ch_feats, axis=1).astype(np.float32, copy=False)
+        yield channel_index, values
+
+
+def find_model_manifest(cfg, nodes, dropout, tag):
+    matches = []
+    for path in sorted(glob(os.path.join(cfg.dnn_models_folder, "*", MODEL_MANIFEST_FILENAME))):
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if [int(value) for value in payload.get("nodes_per_layer", [])] != [int(value) for value in nodes]:
+            continue
+        if float(payload.get("dropout_rate", -1.0)) != float(dropout):
+            continue
+        if payload.get("model_tag", "") != tag:
+            continue
+        matches.append((os.path.dirname(path), payload))
+    if len(matches) > 1:
+        raise RuntimeError(
+            "More than one DNN model manifest matches the requested architecture/tag: "
+            f"{[path for path, _ in matches]}"
+        )
+    return matches[0] if matches else (None, None)
+
+
+def add_correction_dnn(
+    cfg,
+    inferencer,
+    nodes: list[int],
+    dropout: float,
+    tag: str,
+    column_tag: str,
+    per_channel_cols: list[str],
+    infer_batch: int,
+    plot_dir_loss: str,
+    preprocess_inputs: bool = False,
+    plot_inputs: bool = False,
+    plot_dir_inputs: str = None,
+) -> None:
     print("Hello from add_correction_dnn()!")
     print(f"Loading checkpoint: {cfg.dnn_models_folder}")
     tag = tag_with_input_preprocessing(tag, preprocess_inputs)
@@ -213,18 +406,73 @@ def add_correction_dnn(cfg, inferencer, nodes: list[int], dropout: float, tag: s
     print(f"DNN apply preprocess_inputs={preprocess_inputs}")
     print(f"DNN apply resolved tag={tag!r}, output tag={dnn_output_tag!r}")
 
+    modeldir, model_manifest = find_model_manifest(
+        cfg=cfg,
+        nodes=nodes,
+        dropout=dropout,
+        tag=tag,
+    )
+    if model_manifest is None:
+        feature_spec = prepare_dnn_inputs.make_feature_spec()
+    else:
+        feature_spec = prepare_dnn_inputs.make_feature_spec(
+            feature_version=model_manifest["feature_version"],
+            module_vocabulary=model_manifest.get("module_vocabulary", []),
+        )
+        if bool(model_manifest.get("preprocess_inputs", False)) != bool(preprocess_inputs):
+            raise ValueError(
+                "DNN preprocessing setting does not match the saved model manifest: "
+                f"saved={model_manifest.get('preprocess_inputs')}, apply={preprocess_inputs}."
+            )
+        saved_per_channel_cols = list(model_manifest.get("per_channel_columns", []))
+        if saved_per_channel_cols:
+            if list(per_channel_cols) != saved_per_channel_cols:
+                print(
+                    "Using per-channel feature order from the DNN model manifest: "
+                    f"{saved_per_channel_cols}"
+                )
+            per_channel_cols = saved_per_channel_cols
+        if int(model_manifest.get("nch", cfg.nch)) != cfg.nch:
+            raise ValueError(
+                f"DNN model expects {model_manifest.get('nch')} channels, "
+                f"but module {cfg.modulename!r} has {cfg.nch}."
+            )
+        if feature_spec["feature_version"] == prepare_dnn_inputs.FEATURE_VERSION_ALL_CHANNELS:
+            module_index = prepare_dnn_inputs.module_onehot_index(cfg.modulename, feature_spec)
+            if module_index == feature_spec.get("unknown_module_index"):
+                print(
+                    f"Module {cfg.modulename!r} was not used for training; activating reserved "
+                    f"UNKNOWN one-hot index {module_index}."
+                )
+
     columns_to_predict = [f"adc_ch{i:03d}_pedsub{column_tag}" for i in range(cfg.nch)]
     adc_channel_indices = [x for x in range(cfg.nch)]
 
     for idx, df_chunk in enumerate(inferencer.full_df_iter()):
-        print(f"Probing input/target files from chunk {idx:03d}...")
-        df_inputs = prepare_dnn_inputs.make_input_df(cfg=cfg, df=df_chunk, adc_channel_indices=adc_channel_indices, column_tag=column_tag)
-        metadata_cols = ["source_run", "source_is_pedestal"]
-        per_event_cols = [c for c in df_inputs.columns if c not in per_channel_cols and c not in metadata_cols]
+        print(f"Probing DNN inputs from chunk {idx:03d}...")
+        df_inputs = prepare_dnn_inputs.make_input_df(
+            cfg=cfg,
+            df=df_chunk,
+            adc_channel_indices=adc_channel_indices,
+            column_tag=column_tag,
+            feature_spec=feature_spec,
+        )
+        per_event_cols = [
+            column
+            for column in df_inputs.columns
+            if column not in per_channel_cols
+            and column not in prepare_dnn_inputs.INPUT_METADATA_COLUMNS
+        ]
         feature_names = list(per_event_cols) + list(per_channel_cols)
-        input_dim = len(per_event_cols) + len(per_channel_cols)
+        input_dim = len(feature_names)
+        if model_manifest is not None and list(model_manifest.get("feature_names", [])) != feature_names:
+            raise ValueError(
+                "Applied DNN feature order does not match the saved model manifest.\n"
+                f"Saved: {model_manifest.get('feature_names')}\nApply: {feature_names}"
+            )
         break
-
+    else:
+        raise RuntimeError("Could not probe DNN inputs: no input chunks were available.")
 
 
     # infer C and the base adc column names from targets
@@ -238,38 +486,78 @@ def add_correction_dnn(cfg, inferencer, nodes: list[int], dropout: float, tag: s
         dropout_rate=dropout,
         tag=tag,
     ).to(device)
-    modeldir = os.path.join(cfg.dnn_models_folder, model.get_model_string())
+    if modeldir is None:
+        modeldir = os.path.join(cfg.dnn_models_folder, model.get_model_string())
     input_preprocessing = load_input_preprocessing(modeldir=modeldir, feature_names=feature_names) if preprocess_inputs else None
 
     state = torch.load(os.path.join(modeldir, "dnn_best.pth"), map_location="cpu")
     model.load_state_dict(state)
     model.eval()
 
-
-
     print(f"Now plotting loss")
     functions_plot.plot_loss(modeldir=modeldir, plot_dir=plot_dir_loss)
     print(f"Plotted loss")
     # return
 
+    network_input_plotter = None
+    raw_input_plotter = None
+    if plot_inputs:
+        if not plot_dir_inputs:
+            raise ValueError("plot_dir_inputs is required when plot_inputs=True.")
+        network_input_plotter = StreamingDNNInputPlotter(
+            feature_names=feature_names,
+            plot_dir=os.path.join(plot_dir_inputs, "network_inputs"),
+        )
+        if input_preprocessing is not None:
+            raw_input_plotter = StreamingDNNInputPlotter(
+                feature_names=feature_names,
+                plot_dir=os.path.join(plot_dir_inputs, "before_preprocessing"),
+            )
+
+        print("Scanning applied DNN inputs to establish plotting ranges...")
+        for df_chunk in inferencer.full_df_iter():
+            df_inputs = prepare_dnn_inputs.make_input_df(
+                cfg=cfg,
+                df=df_chunk,
+                adc_channel_indices=adc_channel_indices,
+                column_tag=column_tag,
+                feature_spec=feature_spec,
+            )
+            for _, raw_values in iter_feature_matrices(
+                df_inputs=df_inputs,
+                per_event_cols=per_event_cols,
+                per_channel_cols=per_channel_cols,
+                nch=C,
+            ):
+                if raw_input_plotter is not None:
+                    raw_input_plotter.observe_range(raw_values)
+                network_values = apply_input_preprocessing(raw_values, input_preprocessing)
+                network_input_plotter.observe_range(network_values)
+        network_input_plotter.finalize_ranges()
+        if raw_input_plotter is not None:
+            raw_input_plotter.finalize_ranges()
+
     for idx, df_chunk in enumerate(inferencer.full_df_iter()):
 
-        df_inputs = prepare_dnn_inputs.make_input_df(cfg=cfg, df=df_chunk, adc_channel_indices=adc_channel_indices, column_tag=column_tag)
+        df_inputs = prepare_dnn_inputs.make_input_df(cfg=cfg, df=df_chunk, adc_channel_indices=adc_channel_indices, column_tag=column_tag, feature_spec=feature_spec)
         E = df_inputs.shape[0]
-
-        x_evt = df_inputs[per_event_cols].to_numpy(np.float32, copy=False)
-        ch_mats = inferencers.matrices_from_per_channel_cols(per_channel_cols=per_channel_cols, df=df_inputs, nch=cfg.nch)
 
         # predictions [E, C]
         preds = np.full((E, C), np.nan, dtype=np.float32)
 
         # predict channel-by-channel (keeps memory bounded)
         with torch.no_grad():
-            for ch in range(C):
-                # build feature matrix for all events at this channel: [E, Fevt + Fch]
-                ch_feats = [ch_mats[ccol][:, ch][:, None] for ccol in per_channel_cols]  # each [E,1]
-                X = np.concatenate([x_evt] + ch_feats, axis=1).astype(np.float32, copy=False)  # [E, F]
-                X = apply_input_preprocessing(X, input_preprocessing)
+            for ch, raw_values in iter_feature_matrices(
+                df_inputs=df_inputs,
+                per_event_cols=per_event_cols,
+                per_channel_cols=per_channel_cols,
+                nch=C,
+            ):
+                if raw_input_plotter is not None:
+                    raw_input_plotter.fill(raw_values)
+                X = apply_input_preprocessing(raw_values, input_preprocessing)
+                if network_input_plotter is not None:
+                    network_input_plotter.fill(X)
 
                 # torch inference in batches
                 out = np.empty((E,), dtype=np.float32)
@@ -306,6 +594,10 @@ def add_correction_dnn(cfg, inferencer, nodes: list[int], dropout: float, tag: s
         )
         print(f"Wrote updated df with DNN predictions and residuals to {outfilename}, overwriting possibly existing columns in existing file.")
 
+    if network_input_plotter is not None:
+        network_input_plotter.write()
+    if raw_input_plotter is not None:
+        raw_input_plotter.write()
 
     print("Done.")
 

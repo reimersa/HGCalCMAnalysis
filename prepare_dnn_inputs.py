@@ -8,10 +8,29 @@ import numpy as np # type: ignore
 import os
 import json
 import argparse
+import re
 
 import classes
 import inferencers
 import utils
+
+INPUT_METADATA_COLUMNS = {"source_run", "source_is_pedestal"}
+FEATURE_VERSION_LEGACY = "legacy_v1"
+FEATURE_VERSION_ALL_CHANNELS = "all_channels_multimodule_v1"
+SUPPORTED_FEATURE_VERSIONS = {
+    FEATURE_VERSION_LEGACY,
+    FEATURE_VERSION_ALL_CHANNELS,
+}
+DNN_INPUT_MANIFEST_FILENAME = "dnn_input_manifest.json"
+PER_CHANNEL_INPUT_COLUMNS = [
+    "channel_indices",
+    "erx_indices",
+    "cell_area_fraction",
+    "adc_unconnected_00",
+    "adc_unconnected_01",
+    "adc_unconnected_02",
+    "adc_unconnected_03",
+]
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -65,6 +84,26 @@ def main() -> None:
         default="",
         help="Column tag to be appended at the end of 'adc_ch{i:03d}_pedsub'.",
     )
+    parser.add_argument(
+        "--plot-inputs",
+        action="store_true",
+        help="Write one full-distribution histogram per DNN input after preparing the input chunks.",
+    )
+    parser.add_argument(
+        "--feature-version",
+        choices=sorted(SUPPORTED_FEATURE_VERSIONS),
+        default=FEATURE_VERSION_LEGACY,
+        help="DNN feature schema. The default preserves existing prepared inputs.",
+    )
+    parser.add_argument(
+        "--module-vocabulary",
+        nargs="+",
+        default=None,
+        help=(
+            "Ordered training-module vocabulary for the multi-module schema. "
+            "One additional UNKNOWN one-hot entry is always reserved."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -85,9 +124,19 @@ def main() -> None:
         ) 
         for x in args.modules
     ]
+    feature_spec = make_feature_spec(
+        feature_version=args.feature_version,
+        module_vocabulary=args.module_vocabulary or args.modules,
+    )
     for cfg in cfgs:
         inferencer = inferencers.AnalysisTruthInferencer(cfg=cfg, selection=args.selection)
-        prepare_dnn_inputs(cfg=cfg, column_tag=args.column_tag, inferencer=inferencer)
+        prepare_dnn_inputs(
+            cfg=cfg,
+            column_tag=args.column_tag,
+            inferencer=inferencer,
+            plot_inputs=args.plot_inputs,
+            feature_spec=feature_spec,
+        )
 
 
 
@@ -115,7 +164,125 @@ def _load_cell_area_fractions(cfg, adc_channel_indices):
     return sfs[np.asarray(adc_channel_indices, dtype=np.int64)]
 
 
-def make_input_df(cfg, df, adc_channel_indices, column_tag):
+def make_feature_spec(feature_version=FEATURE_VERSION_LEGACY, module_vocabulary=None):
+    if feature_version not in SUPPORTED_FEATURE_VERSIONS:
+        raise ValueError(
+            f"Unsupported DNN feature version {feature_version!r}; "
+            f"choose one of {sorted(SUPPORTED_FEATURE_VERSIONS)}."
+        )
+    modules = [] if module_vocabulary is None else [str(x) for x in module_vocabulary]
+    if len(set(modules)) != len(modules):
+        raise ValueError(f"Duplicate module names in DNN module vocabulary: {modules}")
+    if feature_version == FEATURE_VERSION_LEGACY:
+        modules = []
+    if feature_version == FEATURE_VERSION_ALL_CHANNELS and not modules:
+        raise ValueError("The all-channel multi-module schema requires a non-empty module vocabulary.")
+    return {
+        "feature_version": feature_version,
+        "module_vocabulary": modules,
+        "unknown_module_index": len(modules) if feature_version == FEATURE_VERSION_ALL_CHANNELS else None,
+        "unknown_module_label": "UNKNOWN" if feature_version == FEATURE_VERSION_ALL_CHANNELS else None,
+    }
+
+
+def dnn_input_schema_id(feature_spec):
+    """Return a stable folder name for one fully materialized input schema."""
+    normalized_spec = make_feature_spec(
+        feature_version=feature_spec["feature_version"],
+        module_vocabulary=feature_spec.get("module_vocabulary"),
+    )
+    version = re.sub(r"[^A-Za-z0-9_.-]+", "_", normalized_spec["feature_version"])
+    modules = compact_module_vocabulary(normalized_spec["module_vocabulary"])
+    return f"{version}__{modules}"
+
+
+def compact_module_vocabulary(module_vocabulary):
+    groups = []
+    for modulename in module_vocabulary:
+        if not re.fullmatch(r"[A-Za-z0-9_]+", modulename):
+            raise ValueError(
+                f"Module name {modulename!r} cannot be used in a DNN input folder. "
+                "Expected only letters, digits, and underscores."
+            )
+        match = re.match(r"^(.*\D)(\d+)$", modulename)
+        if match is None:
+            raise ValueError(
+                f"Module name {modulename!r} cannot be abbreviated in a DNN input folder. "
+                "Expected a trailing numeric identifier."
+            )
+        prefix_and_digits = match.groups()
+        if groups and groups[-1][0] == prefix_and_digits[0]:
+            groups[-1][1].append((modulename, prefix_and_digits[1]))
+        else:
+            groups.append((prefix_and_digits[0], [(modulename, prefix_and_digits[1])]))
+
+    compact_groups = []
+    for _, entries in groups:
+        first_name, _ = entries[0]
+        compact = first_name
+        numeric_values = [digits for _, digits in entries]
+        common_numeric_prefix = os.path.commonprefix(numeric_values) if len(numeric_values) > 1 else ""
+        for _, digits in entries[1:]:
+            suffix = digits[len(common_numeric_prefix):] or digits
+            compact += f"-{suffix}"
+        compact_groups.append(compact)
+    return "_".join(compact_groups) or "no_modules"
+
+
+def _manifest_matches_feature_spec(folder, feature_spec):
+    path = os.path.join(folder, DNN_INPUT_MANIFEST_FILENAME)
+    if not os.path.isfile(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    return (
+        payload.get("feature_version") == feature_spec["feature_version"]
+        and list(payload.get("module_vocabulary", [])) == list(feature_spec["module_vocabulary"])
+        and payload.get("unknown_module_index") == feature_spec["unknown_module_index"]
+    )
+
+
+def configure_dnn_input_folder(cfg, feature_spec, allow_legacy_fallback=False):
+    """Point a config at inputs materialized for exactly this feature schema."""
+    base = getattr(cfg, "dnn_training_input_base_folder", None)
+    if base is None:
+        base = cfg.dnn_training_input_folder
+        cfg.dnn_training_input_base_folder = base
+    folder = os.path.join(base, dnn_input_schema_id(feature_spec))
+    if (
+        allow_legacy_fallback
+        and not os.path.isfile(os.path.join(folder, DNN_INPUT_MANIFEST_FILENAME))
+        and _manifest_matches_feature_spec(base, feature_spec)
+    ):
+        folder = base
+        print(f"Using compatible pre-schema-folder DNN inputs from {folder}")
+    cfg.dnn_training_input_folder = folder
+    return folder
+
+
+def module_onehot_columns(feature_spec):
+    if feature_spec["feature_version"] != FEATURE_VERSION_ALL_CHANNELS:
+        return []
+    return [f"module_onehot_{index:03d}" for index in range(len(feature_spec["module_vocabulary"]) + 1)]
+
+
+def module_onehot_index(modulename, feature_spec):
+    if feature_spec["feature_version"] != FEATURE_VERSION_ALL_CHANNELS:
+        return None
+    modules = feature_spec["module_vocabulary"]
+    try:
+        return modules.index(modulename)
+    except ValueError:
+        return int(feature_spec["unknown_module_index"])
+
+
+def make_input_df(cfg, df, adc_channel_indices, column_tag, feature_spec=None):
+
+    feature_spec = feature_spec or make_feature_spec()
+    feature_version = feature_spec["feature_version"]
 
     cm_columns = [f"cm_erx{idx:02}_pedsub" for idx in range(cfg.ncmchannels)]
     df_inputs = df[cm_columns].copy().astype("float32")
@@ -141,7 +308,7 @@ def make_input_df(cfg, df, adc_channel_indices, column_tag):
     cell_area_fractions = _load_cell_area_fractions(cfg=cfg, adc_channel_indices=adc_channel_indices)
     df_inputs["cell_area_fraction"] = [cell_area_fractions.tolist()] * len(df_inputs)
 
-    # unconnected channels on the same e-Rx as the channel
+    # unconnected channels on the same e-Rx as the channel (legacy schema)
     def _build_unconnected_feature(offset: int, out_col: str) -> np.ndarray:
         src_cols = [f"adc_ch{(x * cfg.nch_per_erx + offset):03d}_pedsub{column_tag}" for x in erx_indices]
         arr = df[src_cols].to_numpy(dtype=np.float32, copy=True)
@@ -157,34 +324,78 @@ def make_input_df(cfg, df, adc_channel_indices, column_tag):
         df_inputs[out_col] = arr.tolist()
         return arr
 
-    unconn_arrays = [
-        _build_unconnected_feature(offset=8, out_col="adc_unconnected_00"),
-        _build_unconnected_feature(offset=17, out_col="adc_unconnected_01"),
-        _build_unconnected_feature(offset=19, out_col="adc_unconnected_02"),
-        _build_unconnected_feature(offset=28, out_col="adc_unconnected_03"),
-    ]
+    if feature_version == FEATURE_VERSION_LEGACY:
+        _build_unconnected_feature(offset=8, out_col="adc_unconnected_00")
+        _build_unconnected_feature(offset=17, out_col="adc_unconnected_01")
+        _build_unconnected_feature(offset=19, out_col="adc_unconnected_02")
+        _build_unconnected_feature(offset=28, out_col="adc_unconnected_03")
 
     # # number of channels with toa and with tot
     df_inputs[f"nchtoa"] = df["nchtoa"]
     df_inputs[f"nchtot"] = df["nchtot"]
-    df_inputs["nchadcgt10"] = df["nchadcgt10"]
-    df_inputs["nchadcgt50"] = df["nchadcgt50"]
-    df_inputs["nchadcgt200"] = df["nchadcgt200"]
-    df_inputs["nchadcgt500"] = df["nchadcgt500"]
-    
+    if feature_version == FEATURE_VERSION_ALL_CHANNELS:
+        for column in ["nchadcgt10", "nchadcgt50", "nchadcgt200", "nchadcgt500"]:
+            df_inputs[column] = df[column].astype("float32")
+
+        onehot_index = module_onehot_index(cfg.modulename, feature_spec)
+        for index, column in enumerate(module_onehot_columns(feature_spec)):
+            df_inputs[column] = np.float32(index == onehot_index)
+
+        source_columns = [f"adc_ch{channel:03d}_pedsub_nocut" for channel in adc_channel_indices]
+        missing = [column for column in source_columns if column not in df.columns]
+        if missing:
+            raise KeyError(
+                "The all-channel DNN schema requires unmasked pedestal-subtracted ADC "
+                f"columns. Missing {len(missing)} column(s), beginning with {missing[:3]}. "
+                "Regenerate analysis inputs with convert_to_df.py."
+            )
+        all_channel_values = df[source_columns].to_numpy(dtype=np.float32, copy=True)
+        nonfinite = ~np.isfinite(all_channel_values)
+        if np.any(nonfinite):
+            print(
+                f"[warning] Replacing {int(np.count_nonzero(nonfinite))} non-finite "
+                "all-channel ADC input value(s) with 0."
+            )
+            all_channel_values[nonfinite] = np.float32(0.0)
+        all_channel_columns = [f"adc_allch_{channel:03d}" for channel in adc_channel_indices]
+        df_all_channels = pd.DataFrame(
+            all_channel_values,
+            columns=all_channel_columns,
+            index=df_inputs.index,
+            dtype="float32",
+        )
+        df_inputs = pd.concat([df_inputs, df_all_channels], axis=1)
+
     return df_inputs
 
 
-def prepare_dnn_inputs(cfg, column_tag, inferencer, nch_to_use=None):
+def prepare_dnn_inputs(
+    cfg,
+    column_tag,
+    inferencer,
+    nch_to_use=None,
+    plot_inputs: bool = False,
+    feature_spec=None,
+):
     print("Hello from prepare_dnn_inputs()!")
 
     # Open file and load tree
     print(f"Preparing DNN inputs from Run{cfg.run} for module {cfg.modulename}...")
-    # make output folder
+    feature_spec = feature_spec or make_feature_spec()
+    configure_dnn_input_folder(cfg=cfg, feature_spec=feature_spec)
+    # Each complete feature schema has an independent materialized input set.
     os.makedirs(name=cfg.dnn_training_input_folder, exist_ok=True)
 
     if nch_to_use is None:
         nch_to_use = cfg.nch
+    if (
+        feature_spec["feature_version"] == FEATURE_VERSION_ALL_CHANNELS
+        and nch_to_use != cfg.nch
+    ):
+        raise ValueError(
+            f"The all-channel DNN schema requires all {cfg.nch} channels; "
+            f"received nch_to_use={nch_to_use}."
+        )
 
     adc_channel_indices = [x for x in range(nch_to_use)]
     target_columns = [f"adc_ch{idx:03}_pedsub{column_tag}" for idx in adc_channel_indices]
@@ -200,7 +411,13 @@ def prepare_dnn_inputs(cfg, column_tag, inferencer, nch_to_use=None):
 
     for idx, df_chunk in enumerate(inferencer.full_df_iter()):
         df_targets = df_chunk[target_columns].copy().astype("float32")
-        df_inputs  = make_input_df(cfg=cfg, df=df_chunk, adc_channel_indices=adc_channel_indices, column_tag=column_tag)
+        df_inputs = make_input_df(
+            cfg=cfg,
+            df=df_chunk,
+            adc_channel_indices=adc_channel_indices,
+            column_tag=column_tag,
+            feature_spec=feature_spec,
+        )
 
         print(df_targets)
         print(df_inputs)
@@ -232,8 +449,173 @@ def prepare_dnn_inputs(cfg, column_tag, inferencer, nch_to_use=None):
         target_columns=target_columns,
         split_map=dict(zip(df_split["event_id_global"].to_numpy(np.int64), df_split["split"].astype(str).to_numpy())),
     )
+    input_manifest = dict(feature_spec)
+    input_manifest.update(
+        {
+            "module": cfg.modulename,
+            "nch": cfg.nch,
+            "column_tag": column_tag,
+            "per_channel_columns": (
+                ["channel_indices", "erx_indices", "cell_area_fraction"]
+                if feature_spec["feature_version"] == FEATURE_VERSION_ALL_CHANNELS
+                else list(PER_CHANNEL_INPUT_COLUMNS)
+            ),
+        }
+    )
+    utils.write_via_tmpdir(
+        outfilename=os.path.join(cfg.dnn_training_input_folder, DNN_INPUT_MANIFEST_FILENAME),
+        suffix=".json",
+        writer_fn=lambda tmp, payload=input_manifest: _write_json(tmp, payload),
+    )
+    if plot_inputs:
+        plot_dnn_input_distributions(cfg=cfg, chunk_indices=chunk_indices)
 
     print(f"--> Wrote input, target, and split DFs to: {cfg.dnn_training_input_folder}")
+
+
+def _write_json(path: str, payload) -> None:
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+        handle.write("\n")
+
+
+def _iter_input_column_arrays(series: pd.Series, block_rows: int = 2048):
+    """Yield flat numeric blocks from either a scalar or list-valued input column."""
+    first_value = next((value for value in series if value is not None), None)
+    is_per_channel = isinstance(first_value, (list, tuple, np.ndarray))
+    if not is_per_channel:
+        yield series.to_numpy(dtype=np.float64, copy=False).reshape(-1)
+        return
+
+    values = series.to_numpy(copy=False)
+    for start in range(0, len(values), block_rows):
+        arrays = [np.asarray(value, dtype=np.float64).reshape(-1) for value in values[start:start + block_rows] if value is not None]
+        if arrays:
+            yield np.concatenate(arrays)
+
+
+def _input_plot_edges(minimum: float, maximum: float, bins: int) -> np.ndarray:
+    if minimum == maximum:
+        padding = max(0.5, abs(minimum) * 0.05)
+        return np.asarray([minimum - padding, maximum + padding], dtype=np.float64)
+    return np.linspace(minimum, maximum, bins + 1, dtype=np.float64)
+
+
+def plot_dnn_input_distributions(cfg, chunk_indices, bins: int = 100) -> None:
+    """Plot the complete distribution of every feature written to inputs_chunk*.parquet."""
+    import matplotlib.pyplot as plt  # type: ignore
+
+    if bins <= 0:
+        raise ValueError(f"Input histogram bin count must be positive, got {bins}.")
+    if not chunk_indices:
+        raise RuntimeError("Cannot plot DNN inputs because no input chunks were written.")
+
+    first_path = os.path.join(cfg.dnn_training_input_folder, f"inputs_chunk{chunk_indices[0]:03d}.parquet")
+    first_df = pd.read_parquet(first_path)
+    first_columns = list(first_df.columns)
+    per_event_names = [
+        column
+        for column in first_columns
+        if column not in INPUT_METADATA_COLUMNS and column not in PER_CHANNEL_INPUT_COLUMNS
+    ]
+    per_channel_names = [column for column in PER_CHANNEL_INPUT_COLUMNS if column in first_columns]
+    feature_names = per_event_names + per_channel_names
+    if not feature_names:
+        raise RuntimeError(f"No DNN feature columns found in {first_path}.")
+
+    stats = {
+        name: {
+            "minimum": np.inf,
+            "maximum": -np.inf,
+            "count": 0,
+            "nonfinite": 0,
+            "sum": 0.0,
+            "sum2": 0.0,
+        }
+        for name in feature_names
+    }
+
+    # First streaming pass: establish exact ranges and summary statistics.
+    for idx in chunk_indices:
+        input_path = os.path.join(cfg.dnn_training_input_folder, f"inputs_chunk{idx:03d}.parquet")
+        df_inputs = first_df[feature_names] if idx == chunk_indices[0] else pd.read_parquet(input_path, columns=feature_names)
+        for name in feature_names:
+            for values in _iter_input_column_arrays(df_inputs[name]):
+                finite = np.isfinite(values)
+                finite_values = values[finite]
+                stats[name]["nonfinite"] += int(values.size - finite_values.size)
+                if finite_values.size == 0:
+                    continue
+                stats[name]["minimum"] = min(stats[name]["minimum"], float(finite_values.min()))
+                stats[name]["maximum"] = max(stats[name]["maximum"], float(finite_values.max()))
+                stats[name]["count"] += int(finite_values.size)
+                stats[name]["sum"] += float(finite_values.sum(dtype=np.float64))
+                stats[name]["sum2"] += float(np.square(finite_values).sum(dtype=np.float64))
+    del df_inputs
+    del first_df
+
+    edges = {}
+    counts = {}
+    for name in feature_names:
+        if stats[name]["count"] == 0:
+            continue
+        edges[name] = _input_plot_edges(stats[name]["minimum"], stats[name]["maximum"], bins=bins)
+        counts[name] = np.zeros(len(edges[name]) - 1, dtype=np.int64)
+
+    # Second streaming pass: fill fixed-bin histograms without retaining all samples.
+    for idx in chunk_indices:
+        input_path = os.path.join(cfg.dnn_training_input_folder, f"inputs_chunk{idx:03d}.parquet")
+        df_inputs = pd.read_parquet(input_path, columns=feature_names)
+        for name in feature_names:
+            if name not in edges:
+                continue
+            for values in _iter_input_column_arrays(df_inputs[name]):
+                finite_values = values[np.isfinite(values)]
+                if finite_values.size:
+                    counts[name] += np.histogram(finite_values, bins=edges[name])[0]
+
+    plot_dir = os.path.join(cfg.plotfolder_base, "dnn_inputs")
+    os.makedirs(plot_dir, exist_ok=True)
+    for input_index, name in enumerate(feature_names):
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_")
+        output_path = os.path.join(plot_dir, f"{input_index:02d}_{safe_name}.pdf")
+        fig, ax = plt.subplots(figsize=(7.0, 5.0))
+
+        if name in edges:
+            widths = np.diff(edges[name])
+            ax.bar(edges[name][:-1], counts[name], width=widths, align="edge", color="tab:blue", alpha=0.8)
+            count = stats[name]["count"]
+            mean = stats[name]["sum"] / count
+            variance = max(stats[name]["sum2"] / count - mean * mean, 0.0)
+            summary = (
+                f"finite entries: {count:,}\n"
+                f"non-finite entries: {stats[name]['nonfinite']:,}\n"
+                f"mean: {mean:.6g}\n"
+                f"std: {np.sqrt(variance):.6g}\n"
+                f"range: [{stats[name]['minimum']:.6g}, {stats[name]['maximum']:.6g}]"
+            )
+        else:
+            summary = f"finite entries: 0\nnon-finite entries: {stats[name]['nonfinite']:,}"
+            ax.text(0.5, 0.5, "No finite values", ha="center", va="center", transform=ax.transAxes)
+
+        ax.text(
+            0.98,
+            0.98,
+            summary,
+            ha="right",
+            va="top",
+            transform=ax.transAxes,
+            fontsize=9,
+            bbox={"facecolor": "white", "edgecolor": "0.8", "alpha": 0.9},
+        )
+        ax.set_title(f"DNN input {input_index}: {name}")
+        ax.set_xlabel(name)
+        ax.set_ylabel("Event-channel entries" if name in PER_CHANNEL_INPUT_COLUMNS else "Events")
+        ax.grid(axis="y", alpha=0.25)
+        fig.tight_layout()
+        fig.savefig(output_path)
+        plt.close(fig)
+        print(f"Wrote DNN input plot: {output_path}")
 
 
 def write_source_run_channel_weights(cfg, chunk_indices, target_columns, split_map):

@@ -161,6 +161,14 @@ def iter_analysis_df_chunks(cfg, nevt_per_batch=100000, keepall=True, adcmax=Non
         df_chunk["nchadcgt50"] = (df_chunk[adc_cols] > 50).sum(axis=1)
         df_chunk["nchadcgt200"] = (df_chunk[adc_cols] > 200).sum(axis=1)
         df_chunk["nchadcgt500"] = (df_chunk[adc_cols] > 500).sum(axis=1)
+
+        # Preserve the pedestal-subtracted measurements before adcmax masking.
+        # The all-channel DNN uses these as inputs while masking only its target
+        # channel at sample-construction time.
+        df_nocut = df_chunk[adc_cols].copy()
+        df_nocut.columns = [f"{column}_nocut" for column in adc_cols]
+        df_chunk = pd.concat([df_chunk, df_nocut.astype("float32")], axis=1)
+
         for erx in range(cfg.nerx):
             ch_start = cfg.nch_per_erx * erx
             ch_stop = cfg.nch_per_erx * (erx + 1)

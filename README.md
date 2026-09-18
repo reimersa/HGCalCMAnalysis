@@ -120,6 +120,59 @@ python derive.py -d
 
 `--dnninputs` prepares DNN inputs and then refreshes only the train/test split selections from the DNN split file. It only needs to be rerun when the underlying analysis inputs, selections, or DNN input features change. If only the DNN architecture, training tag, or training hyperparameters change, rerun `--localdnn` or `--submitdnn` without `--dnninputs`.
 
+Prepared parquet inputs are fully materialized under a deterministic schema subfolder of `dnn_training_inputs`. The schema key includes the feature version and ordered module vocabulary, so inputs for different module combinations coexist without overwriting one another. Network layout, preprocessing, and other training hyperparameters reuse the same prepared schema.
+
+### All-channel, multi-module DNN
+
+The `all_channels_multimodule_v1` schema passes every unmasked channel ADC to the DNN. When predicting channel `i`, its own ADC slot is set to zero, leaving the other `N-1` measurements. It also adds one-hot module inputs with one reserved final `UNKNOWN` entry.
+
+Set the following in `derive.py`:
+
+```python
+modulenames = ["ML_F3WC_IH0182", "ML_F3WC_IH0190"]
+dnn_feature_version = prepare_dnn_inputs.FEATURE_VERSION_ALL_CHANNELS
+combine_modules = True
+per_channel_cols = ["channel_indices", "erx_indices", "cell_area_fraction"]
+dnn_model_tag = "allchannels_multimodule"
+dnn_preprocess_inputs = True  # set False to train on raw inputs/targets
+train_event_fractions = {
+    "ML_F3WC_IH0182": 1.0,
+    "ML_F3WC_IH0190": 0.5,
+}
+validation_event_fractions = {
+    "ML_F3WC_IH0182": 1.0,
+    "ML_F3WC_IH0190": 1.0,
+}
+```
+
+Fractions are applied independently after the train/validation split. Event-ID hashing chooses a stable subset, so the same physical events are retained in every epoch and under every shuffle mode. The values must be in `(0, 1]`; remove a module from `modulenames` instead of assigning it zero.
+
+When `dnn_preprocess_inputs` is true, both inputs and per-channel targets are z-score transformed using statistics computed only from the retained training events. The resolved model name receives an automatic `inputzscore` suffix. When false, no preprocessing file is used and the base model tag is retained. Set the corresponding `dnn_preprocess_inputs` and `dnn_tag` values in `apply.py` when applying the checkpoint.
+
+Run conversion again before preparing this schema because it requires the pre-cut `adc_chNNN_pedsub_nocut` columns. Training writes `model_manifest.json`, including the ordered module vocabulary and reserved unknown index. At application time, set `module_for_correction` to the corresponding `MULTI_...` model group. A target module absent from the training vocabulary automatically activates the saved `UNKNOWN` entry.
+
+The reserved `UNKNOWN` input is intentionally never active during training, matching the initial student procedure; no module-ID dropout or unknown-category retraining is performed.
+
+### Analytic all-inputs baseline
+
+`analytic_allinputs` derives one independent linear predictor per target channel from the same materialized all-channel inputs and retained training events used by the DNN. Each predictor uses the CM values, event-summary counts, module one-hot values, and the other `N-1` channel ADCs. Its own ADC coefficient is fixed to zero. The DNN's channel-index, eRx-index, and cell-area inputs are unnecessary here because every target has its own coefficient row and intercept.
+
+After preparing inputs, derive the predictor with:
+
+```bash
+./derive.py --analytic-allinputs
+```
+
+Use `./derive.py -i --analytic-allinputs` when the configured input schema has not yet been materialized. The derivation uses only the prepared `train` split and applies `train_event_fractions` independently to each module. It writes weights, intercepts, and a feature/module manifest under the combined correction group's `predictors` folder.
+
+Apply and evaluate it like the existing methods:
+
+```bash
+./apply.py -k -p -m analytic_allinputs
+```
+
+Application does not need a preprocessing switch or preprocessing JSON. Feature scaling is used only internally to stabilize the pseudoinverse, after which weights are stored in the original input units. An unseen module activates the reserved `UNKNOWN` one-hot entry; because that entry is constant during derivation, its coefficient is fixed to zero.
+
 ## Condor DNN Submission
 
 `python derive.py --submitdnn` and `python derive.py --all` submit DNN training jobs through Condor via `submit_train.py`.
@@ -218,3 +271,20 @@ A tagged/preprocessed DNN writes columns such as:
 adc_ch000_pedsub_pred_dnn_chunkshuffle_modulesummaries_targetspreproc_inputzscore
 adc_ch000_pedsub_resid_dnn_chunkshuffle_modulesummaries_targetspreproc_inputzscore
 ```
+
+## Standalone MIP/Landau Fit
+
+`mip_landau.py` streams matching columns from parquet inputs, fits a pedestal plus one- and two-MIP Landau-Gaussian model, and writes linear/logarithmic PDFs and a JSON fit summary:
+
+```bash
+python mip_landau.py \
+  '/eos/user/.../analysis_inputs/.../df_batch*.parquet' \
+  --columns 'adc_ch*_pedsub_resid_dnn_*' \
+  --output-dir plots/mip_landau \
+  --range -10 40 \
+  --fit-range -5 35
+```
+
+The numerical Landau lookup is initialized lazily on the first fit, so importing the ordinary plotting modules has no added cost.
+
+For non-pedestal runs, the normal `apply.py --plots` workflow also performs this fit on the pooled all-channel distribution after applying the configured event selection. The method-specific `distributions_1d` folder receives linear/logarithmic fit PDFs and a JSON summary. The plot annotation includes the Landau location, Landau width `c_L`, fitted one-MIP peak, and fit quality.

@@ -70,7 +70,7 @@ class AnalysisDNNInferencer:
     - Provides a sample iterator yielding per-(event,channel) samples for PerChannelDNN
     """
 
-    def __init__(self, cfg, split: str = "train", per_channel_cols: Optional[list[str]] = None, require_weights: bool = False):
+    def __init__(self, cfg, split: str = "train", per_channel_cols: Optional[list[str]] = None, require_weights: bool = False, event_fraction: float = 1.0):
         self.cfg = cfg
         self.name = "dnn"
         self.split = split  # "train" or "test" or ""/None for no split filtering
@@ -78,7 +78,9 @@ class AnalysisDNNInferencer:
         self.metadata_cols = ["source_run", "source_is_pedestal"]
         self.batches = classes.DNNBatchIter(cfg=cfg, require_weights=require_weights)
         self.require_weights = require_weights
+        self.event_fraction = validate_event_fraction(event_fraction)
         self.per_event_cols = None  # to be set on first sample_iter call
+        self.allch_col_idx = None
 
         split_path = os.path.join(cfg.dnn_training_input_folder, "event_split_train_test.parquet")
         df_split = pd.read_parquet(split_path)
@@ -112,7 +114,11 @@ class AnalysisDNNInferencer:
     # --- iterators in the "TruthInferencer style" ---
     def full_inputs_iter(self):
         for batch in self.batches:
-            yield self.apply_split(batch).full_inputs_df
+            df_inputs = self.apply_split(batch).full_inputs_df
+            if self.event_fraction < 1.0:
+                keep = event_keep_mask(df_inputs.index.to_numpy(np.int64), self.event_fraction)
+                df_inputs = df_inputs.iloc[keep]
+            yield df_inputs
 
     def sample_iter(
         self,
@@ -125,7 +131,9 @@ class AnalysisDNNInferencer:
         exclude_target_channels: Optional[list[int]] = None,
         include_weights: bool = False,
         include_channel_indices: bool = False,
+        subsample_frac: Optional[float] = None,
     ):
+        subsample_frac = self.event_fraction if subsample_frac is None else validate_event_fraction(subsample_frac)
         if include_weights and not self.require_weights:
             raise RuntimeError("sample_iter(include_weights=True) requires AnalysisDNNInferencer(require_weights=True).")
         if shuffle_mode == "chunk_events":
@@ -136,6 +144,7 @@ class AnalysisDNNInferencer:
                 exclude_target_channels=exclude_target_channels,
                 include_weights=include_weights,
                 include_channel_indices=include_channel_indices,
+                subsample_frac=subsample_frac,
             )
             return
         if shuffle_mode == "buffered_chunk_events":
@@ -147,6 +156,7 @@ class AnalysisDNNInferencer:
                 exclude_target_channels=exclude_target_channels,
                 include_weights=include_weights,
                 include_channel_indices=include_channel_indices,
+                subsample_frac=subsample_frac,
             )
             return
         if shuffle_mode == "global_samples":
@@ -158,6 +168,7 @@ class AnalysisDNNInferencer:
                 exclude_target_channels=exclude_target_channels,
                 include_weights=include_weights,
                 include_channel_indices=include_channel_indices,
+                subsample_frac=subsample_frac,
             )
             return
         raise ValueError("shuffle_mode must be 'chunk_events', 'buffered_chunk_events', or 'global_samples'")
@@ -176,7 +187,21 @@ class AnalysisDNNInferencer:
             raise ValueError("All target channels were excluded.")
         return target_chs
 
-    def _sample_iter_chunk_events(self, batch_samples: int=8192, include_targets: bool=True, epoch_seed=None, exclude_target_channels: Optional[list[int]] = None, include_weights: bool = False, include_channel_indices: bool = False):
+    def _event_features_for_targets(self, X_evt, rows, target_channels):
+        values = X_evt[rows]
+        if self.allch_col_idx is None:
+            self.allch_col_idx = adc_allch_col_indices(self.per_event_cols, self.cfg.nch)
+        if self.allch_col_idx is None:
+            return values
+
+        values = values.copy()
+        values[
+            np.arange(values.shape[0], dtype=np.int64),
+            self.allch_col_idx[target_channels],
+        ] = np.float32(0.0)
+        return values
+
+    def _sample_iter_chunk_events(self, batch_samples: int=8192, include_targets: bool=True, epoch_seed=None, exclude_target_channels: Optional[list[int]] = None, include_weights: bool = False, include_channel_indices: bool = False, subsample_frac: float = 1.0):
         for batch in self.batches:
             b = batch
 
@@ -243,13 +268,17 @@ class AnalysisDNNInferencer:
                 rows_test  = rows_this[is_test_evt[rows_this]]
             
                 if self.split == "train":
-                    rr = np.repeat(rows_train, target_chs.size)
-                    cc = np.tile(target_chs, len(rows_train))
+                    rows_split = rows_train
                 elif self.split == "test":
-                    rr = np.repeat(rows_test, target_chs.size)
-                    cc = np.tile(target_chs, len(rows_test))
+                    rows_split = rows_test
                 else:
                     raise ValueError("split must be 'train' or 'test'")
+
+                if subsample_frac < 1.0 and rows_split.size:
+                    rows_split = rows_split[event_keep_mask(ev_ids[rows_split], subsample_frac)]
+
+                rr = np.repeat(rows_split, target_chs.size)
+                cc = np.tile(target_chs, len(rows_split))
             
                 if rr.size == 0:
                     continue
@@ -258,7 +287,8 @@ class AnalysisDNNInferencer:
                 ch_feats = [ch_mats[col][rr, cc][:, None] for col in self.per_channel_cols]
             
                 # x: [N, Fevt + Fch]
-                x = np.concatenate([X_evt[rr]] + ch_feats, axis=1).astype(np.float32, copy=False)
+                x_evt = self._event_features_for_targets(X_evt, rr, cc)
+                x = np.concatenate([x_evt] + ch_feats, axis=1).astype(np.float32, copy=False)
             
                 if include_targets:
                     y = Y_evt[rr, cc].astype(np.float32, copy=False)
@@ -289,6 +319,7 @@ class AnalysisDNNInferencer:
         exclude_target_channels: Optional[list[int]] = None,
         include_weights: bool = False,
         include_channel_indices: bool = False,
+        subsample_frac: float = 1.0,
     ):
         if self.split not in ("train", "test"):
             raise ValueError("split must be 'train' or 'test' for buffered_chunk_events shuffling")
@@ -351,6 +382,9 @@ class AnalysisDNNInferencer:
             if rows_selected.size == 0:
                 continue
 
+            if subsample_frac < 1.0:
+                rows_selected = rows_selected[event_keep_mask(ev_ids[rows_selected], subsample_frac)]
+
             rows_selected = rng.permutation(rows_selected)
             X_evt = df_inputs[self.per_event_cols].to_numpy(np.float32, copy=False)
             ch_mats = matrices_from_per_channel_cols(per_channel_cols=self.per_channel_cols, df=df_inputs, nch=self.cfg.nch)
@@ -371,7 +405,8 @@ class AnalysisDNNInferencer:
                     continue
 
                 ch_feats = [ch_mats[col][rr, cc][:, None] for col in self.per_channel_cols]
-                x = np.concatenate([X_evt[rr]] + ch_feats, axis=1).astype(np.float32, copy=False)
+                x_evt = self._event_features_for_targets(X_evt, rr, cc)
+                x = np.concatenate([x_evt] + ch_feats, axis=1).astype(np.float32, copy=False)
 
                 if include_targets:
                     y = Y_evt[rr, cc].astype(np.float32, copy=False)
@@ -402,6 +437,7 @@ class AnalysisDNNInferencer:
         exclude_target_channels: Optional[list[int]] = None,
         include_weights: bool = False,
         include_channel_indices: bool = False,
+        subsample_frac: float = 1.0,
     ):
         if self.split not in ("train", "test"):
             raise ValueError("split must be 'train' or 'test' for global_samples shuffling")
@@ -502,6 +538,9 @@ class AnalysisDNNInferencer:
             if rows_selected.size == 0:
                 continue
 
+            if subsample_frac < 1.0:
+                rows_selected = rows_selected[event_keep_mask(ev_ids[rows_selected], subsample_frac)]
+
             rows_selected = rng.permutation(rows_selected)
             X_evt = df_inputs[self.per_event_cols].to_numpy(np.float32, copy=False)
             ch_mats = matrices_from_per_channel_cols(per_channel_cols=self.per_channel_cols, df=df_inputs, nch=self.cfg.nch)
@@ -525,7 +564,8 @@ class AnalysisDNNInferencer:
                 cc = cc[pair_order]
 
                 ch_feats = [ch_mats[col][rr, cc][:, None] for col in self.per_channel_cols]
-                x = np.concatenate([X_evt[rr]] + ch_feats, axis=1).astype(np.float32, copy=False)
+                x_evt = self._event_features_for_targets(X_evt, rr, cc)
+                x = np.concatenate([x_evt] + ch_feats, axis=1).astype(np.float32, copy=False)
                 x_buf.append(x)
                 if include_targets:
                     y = Y_evt[rr, cc].astype(np.float32, copy=False)
@@ -617,6 +657,12 @@ class AnalysisDNNInferencer:
     
                 # broadcast event features: [B, C, Fevt]
                 x_evt_bc = np.broadcast_to(x_evt[:, None, :], (B, self.cfg.nch, Fevt)).astype(np.float32, copy=False)
+                if self.allch_col_idx is None:
+                    self.allch_col_idx = adc_allch_col_indices(self.per_event_cols, self.cfg.nch)
+                if self.allch_col_idx is not None:
+                    x_evt_bc = x_evt_bc.copy()
+                    channel_indices = np.arange(self.cfg.nch, dtype=np.int64)
+                    x_evt_bc[:, channel_indices, self.allch_col_idx] = np.float32(0.0)
     
                 # stack per-channel features: [B, C, Fch]
                 x_ch = np.stack([ch_mats[col][rows, :] for col in self.per_channel_cols], axis=2).astype(np.float32, copy=False)
@@ -641,3 +687,318 @@ def matrices_from_per_channel_cols(per_channel_cols, df, nch):
         mat = np.vstack(df[c].to_numpy()).astype(np.float32, copy=False)
         mats[c] = mat
     return mats
+
+
+def adc_allch_col_indices(per_event_cols, nch):
+    """Return target-channel -> all-channel feature position, or None for legacy inputs."""
+    expected = [f"adc_allch_{channel:03d}" for channel in range(nch)]
+    present = [column for column in expected if column in per_event_cols]
+    if not present:
+        return None
+    if len(present) != nch:
+        missing = [column for column in expected if column not in per_event_cols]
+        raise KeyError(
+            f"Incomplete all-channel DNN input block: found {len(present)}/{nch}; "
+            f"missing starts with {missing[:3]}."
+        )
+    return np.asarray([per_event_cols.index(column) for column in expected], dtype=np.int64)
+
+
+class CombinedAnalysisDNNInferencer:
+    """Stream independently prepared module datasets into one training iterator."""
+
+    def __init__(self, cfgs, split="train", per_channel_cols=None, require_weights=False, event_fractions=None):
+        self.cfgs = list(cfgs)
+        if not self.cfgs:
+            raise ValueError("CombinedAnalysisDNNInferencer requires at least one module.")
+        self.cfg = self.cfgs[0]
+        for cfg in self.cfgs[1:]:
+            if cfg.nch != self.cfg.nch:
+                raise ValueError(
+                    "All modules in one DNN must have the same channel count: "
+                    f"{self.cfg.modulename}={self.cfg.nch}, {cfg.modulename}={cfg.nch}."
+                )
+        self.per_channel_cols = per_channel_cols or ["channel_indices"]
+        event_fractions = event_fractions or {}
+        unknown_modules = sorted(set(event_fractions) - {cfg.modulename for cfg in self.cfgs})
+        if unknown_modules:
+            raise KeyError(f"Event fractions were provided for unknown modules: {unknown_modules}")
+        self.event_fractions = {
+            cfg.modulename: validate_event_fraction(event_fractions.get(cfg.modulename, 1.0))
+            for cfg in self.cfgs
+        }
+        self.sources = [
+            AnalysisDNNInferencer(
+                cfg=cfg,
+                split=split,
+                per_channel_cols=self.per_channel_cols,
+                require_weights=require_weights,
+                event_fraction=self.event_fractions[cfg.modulename],
+            )
+            for cfg in self.cfgs
+        ]
+        self.per_event_cols = None
+        self.allch_col_idx = None
+        self._validate_shared_event_splits()
+
+    def _validate_shared_event_splits(self):
+        labels_by_event = {}
+        for source in self.sources:
+            for event_id, label in source.split_map.items():
+                previous = labels_by_event.setdefault(event_id, label)
+                if previous != label:
+                    raise ValueError(
+                        "The same event ID is assigned to different DNN splits across modules: "
+                        f"event={event_id}, labels={previous!r}/{label!r}."
+                    )
+
+    def _capture_feature_order(self, source):
+        if source.per_event_cols is None:
+            return
+        if self.per_event_cols is None:
+            self.per_event_cols = list(source.per_event_cols)
+        elif self.per_event_cols != list(source.per_event_cols):
+            raise ValueError(
+                "DNN per-event feature order differs between modules: "
+                f"expected {self.per_event_cols}, got {source.per_event_cols}."
+            )
+
+    def full_inputs_iter(self):
+        for source in self.sources:
+            yield from source.full_inputs_iter()
+
+    def sample_iter(self, epoch_seed=None, **kwargs):
+        shuffle_mode = kwargs.get("shuffle_mode", "chunk_events")
+        if shuffle_mode == "buffered_chunk_events":
+            buffered_kwargs = dict(kwargs)
+            buffered_kwargs.pop("shuffle_mode", None)
+            buffered_kwargs.pop("shuffle_buffer_samples", None)
+            yield from self._sample_iter_buffered_chunk_events(
+                epoch_seed=epoch_seed,
+                **buffered_kwargs,
+            )
+            return
+
+        generators = []
+        for source_index, source in enumerate(self.sources):
+            source_seed = None if epoch_seed is None else int(epoch_seed) + source_index * 1000003
+            generators.append(source.sample_iter(epoch_seed=source_seed, **kwargs))
+
+        active = list(range(len(generators)))
+        rng = np.random.default_rng(0 if epoch_seed is None else epoch_seed)
+        while active:
+            order = rng.permutation(active) if epoch_seed is not None else np.asarray(active)
+            exhausted = []
+            for source_index in order:
+                source_index = int(source_index)
+                try:
+                    batch = next(generators[source_index])
+                except StopIteration:
+                    exhausted.append(source_index)
+                    continue
+                self._capture_feature_order(self.sources[source_index])
+                yield batch
+            if exhausted:
+                exhausted_set = set(exhausted)
+                active = [index for index in active if index not in exhausted_set]
+
+    def _sample_iter_buffered_chunk_events(
+        self,
+        batch_samples=8192,
+        include_targets=True,
+        epoch_seed=None,
+        shuffle_buffer_chunks=1,
+        exclude_target_channels=None,
+        include_weights=False,
+        include_channel_indices=False,
+        subsample_frac=None,
+    ):
+        common_event_fraction = (
+            None
+            if subsample_frac is None
+            else validate_event_fraction(subsample_frac)
+        )
+        if self.sources[0].split not in ("train", "test"):
+            raise ValueError(
+                "split must be 'train' or 'test' for buffered_chunk_events shuffling"
+            )
+
+        batch_samples = int(batch_samples)
+        shuffle_buffer_chunks = int(shuffle_buffer_chunks)
+        if batch_samples <= 0:
+            raise ValueError("batch_samples must be positive")
+        if shuffle_buffer_chunks <= 0:
+            raise ValueError("shuffle_buffer_chunks must be positive")
+        if include_weights and not all(source.require_weights for source in self.sources):
+            raise RuntimeError(
+                "sample_iter(include_weights=True) requires weights for every module."
+            )
+
+        records = [
+            (source_index, chunk_index)
+            for source_index, source in enumerate(self.sources)
+            for chunk_index in range(len(source.batches.inputfiles))
+        ]
+        rng = np.random.default_rng(0 if epoch_seed is None else epoch_seed)
+        record_order = (
+            rng.permutation(len(records))
+            if epoch_seed is not None
+            else np.arange(len(records), dtype=np.int64)
+        )
+
+        for start_chunk in range(0, len(records), shuffle_buffer_chunks):
+            group_indices = record_order[start_chunk:start_chunk + shuffle_buffer_chunks]
+            input_frames = []
+            target_frames = []
+            weight_frames = []
+
+            for group_index in group_indices:
+                source_index, chunk_index = records[int(group_index)]
+                source = self.sources[source_index]
+                df_inputs = pd.read_parquet(source.batches.inputfiles[chunk_index])
+                df_targets = pd.read_parquet(source.batches.targetfiles[chunk_index])
+                if not df_inputs.index.equals(df_targets.index):
+                    raise ValueError(
+                        f"DNN inputs and targets have different event indices for "
+                        f"module {source.cfg.modulename!r}, chunk {chunk_index}."
+                    )
+                target_index = df_targets.index
+
+                per_event_cols = [
+                    column
+                    for column in df_inputs.columns
+                    if column not in self.per_channel_cols
+                    and column not in source.metadata_cols
+                ]
+                source.per_event_cols = per_event_cols
+                self._capture_feature_order(source)
+
+                event_ids = df_inputs.index.to_numpy(np.int64, copy=False)
+                split_labels = pd.Index(event_ids).map(source.split_map).to_numpy()
+                valid_split = (split_labels == "train") | (split_labels == "test")
+                if not np.all(valid_split):
+                    bad = event_ids[~valid_split]
+                    raise KeyError(
+                        f"Unknown split label for module {source.cfg.modulename!r} "
+                        f"(showing up to 10): {bad[:10]}"
+                    )
+                keep = split_labels == source.split
+                event_fraction = (
+                    source.event_fraction
+                    if common_event_fraction is None
+                    else common_event_fraction
+                )
+                if event_fraction < 1.0:
+                    keep &= event_keep_mask(event_ids, event_fraction)
+                if not np.any(keep):
+                    continue
+
+                df_inputs = df_inputs.iloc[keep]
+                df_targets = df_targets.iloc[keep]
+                input_frames.append(df_inputs)
+                target_frames.append(df_targets)
+
+                if include_weights:
+                    if len(source.batches.weightfiles) != len(source.batches.inputfiles):
+                        raise RuntimeError(
+                            f"DNN weights are missing for module {source.cfg.modulename!r}. "
+                            "Rerun prepare_dnn_inputs.py."
+                        )
+                    df_weights = pd.read_parquet(source.batches.weightfiles[chunk_index])
+                    if not df_weights.index.equals(target_index):
+                        raise ValueError(
+                            f"DNN weights and targets have different event indices for "
+                            f"module {source.cfg.modulename!r}, chunk {chunk_index}."
+                        )
+                    if list(df_weights.columns) != list(df_targets.columns):
+                        raise ValueError(
+                            f"DNN weight columns do not match targets for "
+                            f"module {source.cfg.modulename!r}, chunk {chunk_index}."
+                        )
+                    weight_frames.append(df_weights.iloc[keep])
+
+            if not input_frames:
+                continue
+
+            df_inputs = pd.concat(input_frames, axis=0)
+            df_targets = pd.concat(target_frames, axis=0)
+            df_weights = pd.concat(weight_frames, axis=0) if include_weights else None
+
+            rows_selected = rng.permutation(len(df_inputs))
+            X_evt = df_inputs[self.per_event_cols].to_numpy(np.float32, copy=False)
+            ch_mats = matrices_from_per_channel_cols(
+                per_channel_cols=self.per_channel_cols,
+                df=df_inputs,
+                nch=self.cfg.nch,
+            )
+            Y_evt = df_targets.to_numpy(np.float32, copy=False) if include_targets else None
+            W_evt = df_weights.to_numpy(np.float32, copy=False) if include_weights else None
+            target_channels = self.sources[0]._target_channels(
+                n_channels=df_targets.shape[1],
+                exclude_target_channels=exclude_target_channels,
+            )
+            if self.allch_col_idx is None:
+                self.allch_col_idx = adc_allch_col_indices(
+                    self.per_event_cols,
+                    self.cfg.nch,
+                )
+
+            for start_event in range(0, rows_selected.size, batch_samples):
+                event_rows = rows_selected[start_event:start_event + batch_samples]
+                rows = np.repeat(event_rows, target_channels.size)
+                channels = np.tile(target_channels, event_rows.size)
+                if rows.size == 0:
+                    continue
+
+                event_features = X_evt[rows]
+                if self.allch_col_idx is not None:
+                    event_features = event_features.copy()
+                    event_features[
+                        np.arange(rows.size, dtype=np.int64),
+                        self.allch_col_idx[channels],
+                    ] = np.float32(0.0)
+                channel_features = [
+                    ch_mats[column][rows, channels][:, None]
+                    for column in self.per_channel_cols
+                ]
+                x = np.concatenate(
+                    [event_features] + channel_features,
+                    axis=1,
+                ).astype(np.float32, copy=False)
+
+                if include_targets:
+                    y = Y_evt[rows, channels].astype(np.float32, copy=False)
+                    if include_weights:
+                        weights = W_evt[rows, channels].astype(np.float32, copy=False)
+                        if include_channel_indices:
+                            yield x, y, weights, channels.astype(np.int64, copy=False)
+                        else:
+                            yield x, y, weights
+                    elif include_channel_indices:
+                        yield x, y, channels.astype(np.int64, copy=False)
+                    else:
+                        yield x, y
+                elif include_channel_indices:
+                    yield x, channels.astype(np.int64, copy=False)
+                else:
+                    yield x
+
+
+def validate_event_fraction(value):
+    value = float(value)
+    if not 0.0 < value <= 1.0:
+        raise ValueError(f"DNN event fractions must be in (0, 1], got {value}.")
+    return value
+
+
+def event_keep_mask(event_ids, fraction):
+    """Deterministically retain a fraction of physical event IDs."""
+    fraction = validate_event_fraction(fraction)
+    if fraction >= 1.0:
+        return np.ones(np.asarray(event_ids).shape, dtype=bool)
+    values = np.asarray(event_ids, dtype=np.uint64)
+    values = (values ^ (values >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
+    values = (values ^ (values >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)
+    values = values ^ (values >> np.uint64(31))
+    uniform = (values >> np.uint64(11)).astype(np.float64) / float(1 << 53)
+    return uniform < fraction

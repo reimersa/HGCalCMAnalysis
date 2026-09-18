@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 
 import utils
 
-PEDESTAL_RUNS = {110398, 112044, 1747296821}
+PEDESTAL_RUNS = {110398, 112044, 1747296821, 118212}
+SUPPORTED_CAMPAIGNS = {"Sep2025TB", "Jun2026TB"}
 
 
 class Batch:
@@ -112,18 +113,26 @@ class AnalysisConfig:
     noise_model_fit_folder: str = None
     analytic_predictor_folder: str = None
     dnn_models_folder: str = None
+    dnn_training_input_base_folder: str = None
     dnn_training_input_folder: str = None
     plotfolder_base: str = None
+    campaign: str = "Sep2025TB"
 
 
     def __post_init__(self):
+        if self.campaign not in SUPPORTED_CAMPAIGNS:
+            raise ValueError(
+                f"Unsupported campaign {self.campaign!r}; "
+                f"choose one of {sorted(SUPPORTED_CAMPAIGNS)}"
+            )
+
         self.inputfoldertag = utils.get_input_tag(basetag=self.inputfoldertag, normalize_to_unit_area=False, remove_disconnected=False, standardize_std=self.standardize_std)
         self.infer_layout()
         correction_subfolder = self.get_correction_subfolder()
 
         username = pwd.getpwuid(os.getuid()).pw_name
-        self.raw_datafolder_base             = "/eos/user/a/areimers/hgcal/Sep2025TB"
-        self.datafolder_base                 = f"/eos/user/{username[0]}/{username}/hgcal/Sep2025TB"
+        self.raw_datafolder_base             = f"/eos/user/a/areimers/hgcal/{self.campaign}"
+        self.datafolder_base                 = f"/eos/user/{username[0]}/{username}/hgcal/{self.campaign}"
         self.histofiller_folder              = self.get_histofiller_folder()
         self.analysis_inputs_folder          = os.path.join(self.datafolder_base, f"Run{self.run}/analysis_inputs{self.inputfoldertag}/{self.modulename}/pedestals_from_Run{self.run_for_pedestal}", correction_subfolder)
         self.pedestal_mean_std_folder        = os.path.join(self.datafolder_base, f"Run{self.run_for_pedestal}/means_stds{self.inputfoldertag}/{self.modulename}")
@@ -133,7 +142,8 @@ class AnalysisConfig:
         self.corrections_base_folder   = os.path.join(self.datafolder_base, f"corrections{self.inputfoldertag}", str(self.get_correction_module()), f"pedestals_from_Run{self.run_for_pedestal}", correction_subfolder)
         self.analytic_predictor_folder = os.path.join(self.corrections_base_folder, "predictors")
         self.dnn_models_folder         = os.path.join(self.corrections_base_folder, "dnn_models")
-        self.dnn_training_input_folder = os.path.join(self.corrections_base_folder, "dnn_training_inputs")
+        self.dnn_training_input_base_folder = os.path.join(self.corrections_base_folder, "dnn_training_inputs")
+        self.dnn_training_input_folder = self.dnn_training_input_base_folder
         self.corrections_covs_folder   = os.path.join(self.datafolder_base, f"Run{self.get_correction_run()}/covs{self.inputfoldertag}/{self.get_correction_module()}/pedestals_from_Run{self.run_for_pedestal}", correction_subfolder)
 
         self.is_pedestal = is_pedestal_run(self.run)
@@ -195,7 +205,7 @@ class AnalysisConfig:
         self.plotfolder_base = os.path.join(
             ".",
             "plots",
-            "Sep2025TB",
+            self.campaign,
             f"Run{self.run}",
             f"{self.modulename}{self.inputfoldertag}",
             f"pedestals_from_Run{self.run_for_pedestal}",

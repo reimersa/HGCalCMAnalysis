@@ -136,10 +136,14 @@ def plot_summaries(
     cm_x_range: Tuple[float, float] = (-50.0, 25.0),
     cm_profile_y_range: Optional[Tuple[float, float]] = None,
     cm_adc_range: Optional[Tuple[float, float]] = None,
+    output_tag: str = "",
 ) -> None:
     print("Hello from plot_summaries()!")
     plot_dir = os.path.join(cfg.plotfolder_base, selection)
     os.makedirs(plot_dir, exist_ok=True)
+    summary_compare_dir = os.path.join(plot_dir, "summaries_compare")
+    if output_tag:
+        summary_compare_dir = os.path.join(summary_compare_dir, output_tag)
     if cm_adc_range is None:
         cm_adc_range = _default_per_channel_adc_range(cfg=cfg, selection=selection)
 
@@ -148,7 +152,7 @@ def plot_summaries(
         cfg=cfg,
         value_iterator=inferencer.full_df_iter,
         column_tags=column_tags,
-        out_root=os.path.join(plot_dir, "summaries_compare", "noise_vs_cell_area"),
+        out_root=os.path.join(summary_compare_dir, "noise_vs_cell_area"),
         x_range=x_range,
         y_range=y_range,
     )
@@ -156,14 +160,14 @@ def plot_summaries(
         cfg=cfg,
         value_iterator=inferencer.full_df_iter,
         column_tags=column_tags,
-        out_root=os.path.join(plot_dir, "summaries_compare", "noise_vs_cell_area"),
+        out_root=os.path.join(summary_compare_dir, "noise_vs_cell_area"),
         x_range=x_range,
         y_range=None,
     )
     functions_plot.plot_noise_model_coherent_vs_cell_area(
         cfg=cfg,
         column_tags=column_tags,
-        out_root=os.path.join(plot_dir, "summaries_compare", "noise_vs_cell_area"),
+        out_root=os.path.join(summary_compare_dir, "noise_vs_cell_area"),
         n_coherent=n_coherent_noise_model,
         x_range=x_range,
         y_range=y_range,
@@ -171,7 +175,7 @@ def plot_summaries(
     functions_plot.plot_noise_model_incoherent_vs_cell_area(
         cfg=cfg,
         column_tags=column_tags,
-        out_root=os.path.join(plot_dir, "summaries_compare", "noise_vs_cell_area"),
+        out_root=os.path.join(summary_compare_dir, "noise_vs_cell_area"),
         n_coherent=n_coherent_noise_model,
         x_range=x_range,
         y_range=y_range,

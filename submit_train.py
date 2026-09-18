@@ -7,6 +7,8 @@ import stat
 import subprocess
 from itertools import product
 
+import prepare_dnn_inputs
+
 
 current_dir = os.path.dirname(os.path.realpath(__file__))
 train_script = os.path.join(current_dir, "train_dnn.py")
@@ -64,6 +66,10 @@ request_gpus = 1
 request_cpus = 1
 request_memory_gb = 16
 submit_jobs = True
+combine_modules = False
+feature_version = prepare_dnn_inputs.FEATURE_VERSION_LEGACY
+train_event_fractions = {}
+validation_event_fractions = {}
 
 
 def sanitize_name(value: str) -> str:
@@ -119,7 +125,7 @@ def make_job_name(
 ) -> str:
     effective_tag = tag_with_weight_decay(tag_with_input_preprocessing(modeltag, preprocess_inputs), weight_decay)
     parts = [
-        "_".join(modules),
+        prepare_dnn_inputs.compact_module_vocabulary(modules),
         str(run),
         selection_for_correction,
         effective_tag,
@@ -155,8 +161,14 @@ def submit_train(
     request_cpus: int = 1,
     request_memory_gb: int = 16,
     submit_jobs: bool = True,
+    combine_modules: bool = False,
+    feature_version: str = prepare_dnn_inputs.FEATURE_VERSION_LEGACY,
+    train_event_fractions: dict[str, float] = None,
+    validation_event_fractions: dict[str, float] = None,
 ) -> None:
     os.makedirs(workdir, exist_ok=True)
+    train_event_fractions = train_event_fractions or {}
+    validation_event_fractions = validation_event_fractions or {}
 
     proxy_filename_orig = f"/tmp/x509up_u{os.getuid()}"
     proxy_filename_forjob = os.path.join(workdir, "voms_proxy")
@@ -191,7 +203,15 @@ def submit_train(
         args += ["--shuffle-buffer-chunks", str(shuffle_buffer_chunks)]
         args += ["--sample-weighting", sample_weighting]
         args += ["--per-channel-cols"] + per_channel_cols
+        args += ["--feature-version", feature_version]
         args += ["--noprogbar"]
+        if combine_modules:
+            args += ["--combine-modules"]
+        for module in modules:
+            if module in train_event_fractions:
+                args += ["--module-train-frac", f"{module}={train_event_fractions[module]}"]
+            if module in validation_event_fractions:
+                args += ["--module-val-frac", f"{module}={validation_event_fractions[module]}"]
         if modeltag:
             args += ["-t", modeltag]
         if preprocess_inputs:
@@ -273,6 +293,10 @@ def main():
         request_cpus=request_cpus,
         request_memory_gb=request_memory_gb,
         submit_jobs=submit_jobs,
+        combine_modules=combine_modules,
+        feature_version=feature_version,
+        train_event_fractions=train_event_fractions,
+        validation_event_fractions=validation_event_fractions,
     )
 
 

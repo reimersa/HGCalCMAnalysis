@@ -14,6 +14,7 @@ import mplhep as mh
 
 import utils
 import classes
+import mip_landau
 
 
 def _coolwarm_palette_payload():
@@ -196,28 +197,50 @@ def plot_noise_model_fit(cfg: classes.AnalysisConfig, column_tag, zrange_cov, pl
             axr = fig.add_subplot(gs[1], sharex=ax1)
             axc = fig.add_subplot(gs[2], sharex=ax1)
 
-            ax1.plot(x, raw_sigma_inc, "-",  label="incoherent (meas.)", color="tab:blue")
-            ax1.plot(x, raw_sigma_coh, "-",  label="coherent (meas.)",   color="tab:orange")
-            ax1.plot(x, sigma_inc,     "--", label="incoherent (corr.)", color="tab:blue")
-            ax1.plot(x, sigma_coh,     "--", label="coherent (corr.)",   color="tab:orange")
+            unconnected_channels = sorted(
+                channel
+                for channel in (cfg.unconnected_channels or [])
+                if 0 <= channel < channels.shape[0]
+            )
+            connected_mask = ~np.isin(x, unconnected_channels)
+            connected_x = x[connected_mask]
+
+            ax1.plot(connected_x, raw_sigma_inc[connected_mask], ".", label="incoherent (meas.)", color="tab:blue", ms=4)
+            ax1.plot(connected_x, raw_sigma_coh[connected_mask], ".", label="coherent (meas.)", color="tab:orange", ms=4)
+            ax1.plot(connected_x, sigma_inc[connected_mask], "x", label="incoherent (corr.)", color="tab:blue", ms=3)
+            ax1.plot(connected_x, sigma_coh[connected_mask], "x", label="coherent (corr.)", color="tab:orange", ms=3)
 
             for ax_this in (ax1, axr, axc):
                 ax_this.tick_params(axis="both", direction="in", top=True, bottom=True, left=True, right=True, labelsize=12)
                 ax_this.grid(ls="--", alpha=0.3)
                 for pos in range(0, cfg.nch_per_erx * (cfg.nerx + 1), cfg.nch_per_erx):
                     ax_this.axvline(pos, color="black", linestyle="--", linewidth=1, alpha=0.35)
+                for channel in unconnected_channels:
+                    ax_this.axvspan(
+                        channel - 0.5,
+                        channel + 0.5,
+                        color="lightgrey",
+                        alpha=1.0,
+                        linewidth=0,
+                        zorder=3,
+                        label=(
+                            "unconnected channels"
+                            if ax_this is ax1 and channel == unconnected_channels[0]
+                            else None
+                        ),
+                    )
 
             ax1.set_ylabel("Noise (ADC)", fontsize=16, loc="top", labelpad=12)
             ax1.set_ylim(0., ax1.get_ylim()[1] * 1.2)
             ax1.legend(loc="upper right", fontsize=12)
 
-            axr.plot(x, inc_ratio, "--", color="tab:blue")
-            axr.plot(x, coh_ratio, "--", color="tab:orange")
+            axr.plot(connected_x, inc_ratio[connected_mask], "x", color="tab:blue", ms=3)
+            axr.plot(connected_x, coh_ratio[connected_mask], "x", color="tab:orange", ms=3)
             axr.set_ylabel("corr. / meas.", fontsize=11, loc="center", labelpad=10)
             axr.set_ylim(0., 1.1)
 
-            axc.plot(x, coh_over_inc_true, "-",  color="black")
-            axc.plot(x, coh_over_inc_corr, "--", color="black")
+            axc.plot(connected_x, coh_over_inc_true[connected_mask], ".", color="black", ms=4)
+            axc.plot(connected_x, coh_over_inc_corr[connected_mask], "x", color="black", ms=3)
             axc.set_xlabel("channel", fontsize=16, loc="right", labelpad=8)
             axc.set_ylabel("coh. / inc.", fontsize=11, loc="center", labelpad=8)
             axc.set_ylim(0., max(axc.get_ylim()[1], 2.))
@@ -1264,15 +1287,33 @@ def plot_mse_diagnostics(
         f"Global MSE={global_mse:.6g}; top channels: {top_channels}"
     )
 
-def plot_1d_multicol(varname_template: str, value_iterator, out_root: str, nbins_x: int = None, x_range=None, do_gauss_fit=False, gauss_p0=None, make_logy: bool=False):
+def plot_1d_multicol(
+    varname_template: str,
+    value_iterator,
+    out_root: str,
+    nbins_x: int = None,
+    x_range=None,
+    do_gauss_fit=False,
+    gauss_p0=None,
+    make_logy: bool=False,
+    do_mip_fit: bool=False,
+    mip_fit_range=None,
+):
     os.makedirs(out_root, exist_ok=True)
-        
+    if do_gauss_fit and do_mip_fit:
+        raise ValueError("Choose either a Gaussian fit or a MIP/Landau fit, not both.")
+
     hist = Streaming1DHist(x_min=x_range[0], x_max=x_range[1], nbins_x=nbins_x)
     found_cols = False
+    matched_columns = None
     for full_df in value_iterator():
         cols = [c for c in full_df.columns if fnmatch(c, varname_template)]
         if not cols:
             continue
+        if matched_columns is None:
+            matched_columns = cols
+        elif cols != matched_columns:
+            raise ValueError(f"Matched column order changed while plotting {varname_template}.")
         found_cols = True
         values = full_df[cols].to_numpy().ravel()
         hist.add(values)
@@ -1280,6 +1321,70 @@ def plot_1d_multicol(varname_template: str, value_iterator, out_root: str, nbins
         print(f"[WARNING] No columns found that match the template {varname_template}. Skipping 1D plot.")
         return
     outpath = os.path.join(out_root, f"{varname_template.replace('*', 'all').replace('?', '')}_1d.pdf")
+    if do_mip_fit:
+        outpath = outpath.replace("_1d.pdf", "_mipfit_1d.pdf")
+        centers = 0.5 * (hist.x_edges[:-1] + hist.x_edges[1:])
+        try:
+            result = mip_landau.fit_mip_spectrum(
+                bin_centers=centers,
+                counts=hist.H,
+                fit_range=mip_fit_range,
+            )
+        except Exception as exc:
+            print(f"[WARNING] MIP/Landau fit failed for {varname_template}: {exc}")
+            utils.plot_hist_single_precomputed(
+                x=hist.H,
+                mean=hist.x_mean_rms()[0],
+                rms=hist.x_mean_rms()[1],
+                mean_window=hist.x_mean_rms_window()[0],
+                rms_window=hist.x_mean_rms_window()[1],
+                bins=hist.x_edges,
+                xlabel=varname_template,
+                ylabel="Number of entries",
+                title="MIP/Landau fit failed",
+                color="gray",
+                outpath=outpath,
+                show_mean_line=True,
+                logy=False,
+            )
+            return
+
+        result.update(
+            {
+                "columns": matched_columns or [],
+                "column_pattern": varname_template,
+                "histogram_range": [float(hist.x_edges[0]), float(hist.x_edges[-1])],
+                "fit_range": list(mip_fit_range) if mip_fit_range is not None else None,
+                "bins": int(hist.nxb),
+                "entries_in_histogram": int(np.sum(hist.H)),
+            }
+        )
+        mip_landau.plot_fit(
+            counts=hist.H,
+            edges=hist.x_edges,
+            result=result,
+            output_path=outpath,
+            logy=False,
+            xlabel=varname_template,
+        )
+        if make_logy:
+            mip_landau.plot_fit(
+                counts=hist.H,
+                edges=hist.x_edges,
+                result=result,
+                output_path=outpath.replace(".pdf", "_logy.pdf"),
+                logy=True,
+                xlabel=varname_template,
+            )
+        json_path = outpath.replace(".pdf", ".json")
+        with open(json_path, "w", encoding="utf-8") as handle:
+            json.dump(result, handle, indent=2)
+            handle.write("\n")
+        for warning in result.get("fit_quality", {}).get("warnings", []):
+            print(f"[WARNING] MIP/Landau fit quality for {varname_template}: {warning}")
+        print(f"--> Saved MIP/Landau fit to {outpath} and {json_path}")
+        return
+
     if do_gauss_fit:
         outpath = outpath.replace("_1d.pdf", "_gaussfit_1d.pdf")
     utils.plot_hist_single_precomputed(x=hist.H, mean=hist.x_mean_rms()[0], rms=hist.x_mean_rms()[1], mean_window=hist.x_mean_rms_window()[0], rms_window=hist.x_mean_rms_window()[1], bins=hist.x_edges, xlabel=f"{varname_template}", ylabel="Number of events", title="", color="gray", outpath=outpath, show_mean_line=True, do_gauss_fit=do_gauss_fit, gauss_p0=gauss_p0)

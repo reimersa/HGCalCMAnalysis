@@ -9,6 +9,7 @@ import inferencers
 
 import convert_to_df
 import add_correction_analytic
+import add_correction_analytic_allinputs
 import add_correction_dnn
 import add_projections_onto_noisemode
 import add_vars_and_selections
@@ -21,18 +22,22 @@ import plot_summaries
 def main(args, parser):
     # Setup: edit these values when changing modules/runs/selections.
     modulenames = ["ML_F3WC_IH0182"]
+    # modulenames = ["ML_F3WC_IH0180"]
 
     # Selection used only for plots/evaluation on the target run.
     selection = "selection_trigtime"
+    # selection = "selection_full"
 
     # Selection that was used when the stored correction was derived.
     selection_for_correction = "selection_trigtime"
+    # selection_for_correction = "selection_full"
 
     # Target run to which already-derived corrections are applied.
     # target_run = 112044
     # target_run = 112048
     # target_run = 1120480000
     # target_run = 11204800001
+    # target_run = 112048
     target_run = 112049
     # target_run = 112050
     # target_run = 112051
@@ -42,41 +47,63 @@ def main(args, parser):
     # target_run = "112044_112050_112060_112073_adcmax5"
     # target_run = "112044_112050_112060_112073_adcmax10"
     # target_run = "112046_112047_112048_112049_112050_adcmax10"
+    # target_run = "112049_adcmax10"
     # target_run = "112050_adcmax10"
     # target_run = "112051_adcmax10"
     # target_run = "112060_adcmax10"
     # target_run = "112068_adcmax10"
 
+    # target_run = 118212
+    # target_run = 118224
+
     pedestal_run = 112044
+    # pedestal_run = 118212
     # correction_run = "112044_112050_112060_112073_adcmax5"
+    # correction_run = 118212
     correction_run = "112044_112050_112060_112073_adcmax10"
     # correction_run = "112050_112060_112073_adcmax10"
     # correction_run = "112046_112047_112048_112049_112050_adcmax10"
     # correction_run = "112050_adcmax10"
-    module_for_correction = "ML_F3WC_IH0182"
+
+    # module_for_correction = "ML_F3WC_IH0182"
+    # module_for_correction = f"MULTI_{'_'.join(['ML_F3WC_IH0180', 'ML_F3WC_IH0190', 'ML_F3WC_IH0191', 'ML_F3WC_IH0192', 'ML_F3WC_IH0194'])}"
+    module_for_correction = f"MULTI_{'_'.join(['ML_F3WC_IH0180', 'ML_F3WC_IH0182', 'ML_F3WC_IH0190', 'ML_F3WC_IH0191', 'ML_F3WC_IH0192', 'ML_F3WC_IH0194', 'ML_F3WC_IH0196', 'ML_F3WC_IH0197', 'ML_F3WC_IH0198', 'ML_F3WC_IH0199'])}"
+
 
     n_coherent_noise_model = 3
-    per_channel_cols = ["channel_indices", "erx_indices", "cell_area_fraction"] + [f"adc_unconnected_{i:02d}" for i in range(4)]
+    per_channel_cols = ["channel_indices", "erx_indices", "cell_area_fraction"]
 
     dnn_nodes = [256, 256, 256, 32]
     dnn_dropout = 0.0
     dnn_infer_batch = 8192
 
     # Baseline:
-    # dnn_tag = ""
+    # dnn_tag = "allchannels"
+    dnn_tag = "allchannels_multimodule"
+    dnn_preprocess_inputs = True
     # dnn_preprocess_inputs = False
 
     # Current default.
-    dnn_tag = "chunkshuffle_modulesummaries_targetspreproc"
-    dnn_preprocess_inputs = True
+    # dnn_tag = "chunkshuffle_modulesummaries_targetspreproc"
+    # dnn_preprocess_inputs = True
 
     dnn_resolved_tag = add_correction_dnn.tag_with_input_preprocessing(dnn_tag, dnn_preprocess_inputs)
     dnn_output_tag = add_correction_dnn.dnn_output_tag_from_model_tag(dnn_resolved_tag)
 
     method_column_tags = {
-        "uncorrected": "",
-        "analytic": "_resid_analytic_k0",
-        "dnn": f"_resid{dnn_output_tag}",
+        "uncorrected": [""],
+        "analytic": [
+            "_resid_analytic_k0",
+            # "_pred_analytic_k0",
+        ],
+        "analytic_allinputs": [
+            add_correction_analytic_allinputs.RESIDUAL_SUFFIX,
+            # add_correction_analytic_allinputs.PREDICTION_SUFFIX,
+        ],
+        "dnn": [
+            f"_resid{dnn_output_tag}",
+            # f"_pred{dnn_output_tag}",
+        ],
     }
 
     if args.show or not any_step_requested(args):
@@ -150,6 +177,12 @@ def main(args, parser):
                 if method == "analytic":
                     add_correction_analytic.add_correction_analytic(cfg=cfg, inferencer=inferencer)
                     inferencer = make_full_inferencer(cfg)
+                elif method == "analytic_allinputs":
+                    add_correction_analytic_allinputs.add_correction_analytic_allinputs(
+                        cfg=cfg,
+                        inferencer=inferencer,
+                    )
+                    inferencer = make_full_inferencer(cfg)
                 elif method == "dnn":
                     add_correction_dnn.add_correction_dnn(
                         cfg=cfg,
@@ -162,32 +195,44 @@ def main(args, parser):
                         infer_batch=dnn_infer_batch,
                         plot_dir_loss=dnn_loss_plot_folder(cfg=cfg, selection=selection, dnn_output_tag=dnn_output_tag),
                         preprocess_inputs=dnn_preprocess_inputs,
+                        plot_inputs=args.plot_dnninputs,
+                        plot_dir_inputs=dnn_input_plot_folder(
+                            cfg=cfg,
+                            selection=selection,
+                            dnn_output_tag=dnn_output_tag,
+                        ),
                     )
                     inferencer = make_full_inferencer(cfg)
 
                 inferencer_sel = make_selected_inferencer(cfg=cfg, selection=selection)
-                compute_residual_diagnostics(
-                    cfg=cfg,
-                    inferencer_sel=inferencer_sel,
-                    column_tag=method_column_tags[method],
-                    n_coherent_noise_model=n_coherent_noise_model,
-                )
-                require_uncorrected_projection_basis(cfg)
-                add_projection(cfg=cfg, inferencer=inferencer, column_tag=method_column_tags[method])
+                for column_tag in method_column_tags[method]:
+                    compute_column_diagnostics(
+                        cfg=cfg,
+                        inferencer_sel=inferencer_sel,
+                        column_tag=column_tag,
+                        n_coherent_noise_model=n_coherent_noise_model,
+                    )
+                    require_uncorrected_projection_basis(cfg)
+                    add_projection(cfg=cfg, inferencer=inferencer, column_tag=column_tag)
 
         if args.plots or args.all:
             require_selection_column(cfg=cfg, selection=selection)
             inferencer_sel = make_selected_inferencer(cfg=cfg, selection=selection)
             for method in methods_to_run:
-                plot.plot(
-                    cfg=cfg,
-                    inferencer=inferencer_sel,
-                    column_tag=method_column_tags[method],
-                    selection=selection,
-                    n_coherent_noise_model=n_coherent_noise_model,
-                )
+                for column_tag in method_column_tags[method]:
+                    plot.plot(
+                        cfg=cfg,
+                        inferencer=inferencer_sel,
+                        column_tag=column_tag,
+                        selection=selection,
+                        n_coherent_noise_model=n_coherent_noise_model,
+                    )
 
-            summary_column_tags = [method_column_tags[method] for method in methods_to_run if method != "uncorrected"]
+            summary_column_tags = [
+                method_column_tags[method][0]
+                for method in methods_to_run
+                if method != "uncorrected"
+            ]
             make_summary_plots(
                 cfg=cfg,
                 inferencer_sel=inferencer_sel,
@@ -246,7 +291,7 @@ def print_setup(
 
 
 def selected_methods(args) -> list[str]:
-    method_order = ["uncorrected", "analytic", "dnn"]
+    method_order = ["uncorrected", "analytic", "analytic_allinputs", "dnn"]
     if args.all:
         return method_order
     requested = set(args.methods)
@@ -272,6 +317,7 @@ def make_cfgs(
             module_for_correction=module_for_correction,
             standardize_std=False,
             inputfoldertag="",
+            campaign="Sep2025TB",
         )
         for x in modulenames
     ]
@@ -322,7 +368,7 @@ def require_uncorrected_projection_basis(cfg) -> None:
         )
 
 
-def compute_residual_diagnostics(cfg, inferencer_sel, column_tag, n_coherent_noise_model) -> None:
+def compute_column_diagnostics(cfg, inferencer_sel, column_tag, n_coherent_noise_model) -> None:
     compute_covariances_and_eigen.compute_covariances_and_eigen(
         cfg=cfg,
         inferencer=inferencer_sel,
@@ -351,7 +397,15 @@ def dnn_loss_plot_folder(cfg, selection, dnn_output_tag) -> str:
     return os.path.join(base, dnn_output_tag.strip("_"))
 
 
+def dnn_input_plot_folder(cfg, selection, dnn_output_tag) -> str:
+    base = os.path.join(cfg.plotfolder_base, selection, "dnn_inputs_apply")
+    if dnn_output_tag == "_dnn":
+        return base
+    return os.path.join(base, dnn_output_tag.strip("_"))
+
+
 def make_summary_plots(cfg, inferencer_sel, selection, column_tags, n_coherent_noise_model) -> None:
+    output_tag = "__".join(tag.strip("_") for tag in column_tags) or "uncorrected"
     if cfg.run == 112044:
         plot_summaries.plot_summaries(
             cfg=cfg,
@@ -362,6 +416,7 @@ def make_summary_plots(cfg, inferencer_sel, selection, column_tags, n_coherent_n
             y_range=(0.8, 1.8),
             cm_x_range=(-12.0, 12.0),
             cm_profile_y_range=(-2.0, 3.0),
+            output_tag=output_tag,
         )
     else:
         plot_summaries.plot_summaries(
@@ -370,9 +425,10 @@ def make_summary_plots(cfg, inferencer_sel, selection, column_tags, n_coherent_n
             selection=selection,
             column_tags=column_tags,
             n_coherent_noise_model=n_coherent_noise_model,
-            y_range=(1.0, 4.0),
+            y_range=(0.0, 4.0),
             cm_x_range=(-50.0, 25.0),
             cm_profile_y_range=(-2.0, 3.0),
+            output_tag=output_tag,
         )
 
 
@@ -389,8 +445,8 @@ def build_parser():
         "-m",
         "--methods",
         nargs="+",
-        choices=["uncorrected", "analytic", "dnn"],
-        default=["uncorrected", "analytic", "dnn"],
+        choices=["uncorrected", "analytic", "analytic_allinputs", "dnn"],
+        default=["uncorrected", "analytic_allinputs", "dnn"],
         help="Methods to process or plot.",
     )
     parser.add_argument(
@@ -400,6 +456,11 @@ def build_parser():
         help="Add corrections where applicable, then compute covariance/eigen, noise-model, and projection diagnostics.",
     )
     parser.add_argument("-p", "--plots", action="store_true", help="Make detailed plots and summary comparison plots.")
+    parser.add_argument(
+        "--plot-dnninputs",
+        action="store_true",
+        help="With DNN computation, plot every feature actually passed to the network.",
+    )
     parser.add_argument("--all", action="store_true", help="Run convert, selections, compute, and plots for all methods.")
     parser.add_argument("--show", action="store_true", help="Print the configured setup and available steps, then exit.")
     return parser
