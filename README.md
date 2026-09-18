@@ -1,34 +1,83 @@
 # HGCalCMAnalysis
 
-HGCal common-mode analysis workflow for Sep2025 test-beam data.
+This repository derives, applies, and evaluates common-mode (CM) noise corrections for HGCal module data. It supports the Sep2025 and Jun2026 test-beam layouts and operates on module-level histofiller ROOT inputs.
 
-This directory contains the scripts used to prepare analysis inputs and derive common-mode correction artifacts. The currently supported correction derivation methods are:
+The workflow is split into two entry points:
 
-- analytic linear regression
-- DNN regression
+- `derive.py` prepares training data and derives correction artifacts.
+- `apply.py` applies existing artifacts to a target run and produces diagnostics and plots.
 
-Application and plotting/evaluation are controlled by `apply.py`.
+Configuration is currently code-based: edit the setup block near the top of the relevant entry-point script, inspect the resolved configuration with `--show`, and then run the requested stages.
 
-## Get the Code
+## Correction methods
 
-Clone the analysis repository into a location visible from lxplus, for example on AFS:
+Four evaluation modes are available through `apply.py`:
+
+- `uncorrected` computes the reference diagnostics without applying a correction.
+- `analytic` is the original linear CM-channel correction.
+- `analytic_allinputs` fits an independent linear predictor for every target channel using all other channel measurements and the common event-level inputs.
+- `dnn` applies a shared nonlinear per-channel network trained across one or more modules.
+
+The primary comparison is between `analytic_allinputs` and `dnn`: both can use the full set of channel measurements, while the DNN additionally receives target-channel metadata and can learn nonlinear relations.
+
+### All-channel, multi-module DNN
+
+For a module with `C` channels and a training vocabulary of `N` modules, each DNN sample represents one `(event, target channel)` pair. One network is shared by every target channel and every training module.
+
+The `all_channels_multimodule_v1` feature schema contains:
+
+- 12 pedestal-subtracted CM values;
+- event summaries: `nchtoa`, `nchtot`, `nchadcgt10`, `nchadcgt50`, `nchadcgt200`, and `nchadcgt500`;
+- `N + 1` one-hot module entries, including a reserved `UNKNOWN` entry;
+- all `C` unmasked pedestal-subtracted ADC measurements, ordered by channel index;
+- target-channel index, eRx index, and relative cell area.
+
+The input dimension is therefore `C + N + 22`. With 222 channels and 10 training modules, the network has 254 inputs, of which 222 are channel measurements.
+
+When channel `i` is the prediction target, `adc_allch_i` is set to raw zero before optional preprocessing. The network consequently receives the other `C - 1` measured channels without being given the value it must predict. Unconnected channels remain part of the input vector and, with the current `exclude_unconnected_targets=False` setting, are also retained as prediction targets.
+
+The module vocabulary is the ordered `modulenames` list in `derive.py`. Index zero belongs to the first module, index one to the second, and so on. The final one-hot entry is reserved for a module that was not present during training. `model_manifest.json` records this mapping, the exact feature order, the architecture, and the preprocessing setting. During application, a module absent from the saved vocabulary automatically activates `UNKNOWN`.
+
+The reserved entry is never active during the current training procedure. Applying a model to an unseen module is supported mechanically, but its performance must be validated as an extrapolation.
+
+Training uses buffered cross-module chunk shuffling. Events from the configured modules are mixed during optimization without loading the complete dataset into memory.
+
+### Optional DNN preprocessing
+
+Set `dnn_preprocess_inputs` in both entry-point scripts to select the matching model variant:
+
+```python
+dnn_preprocess_inputs = True
+```
+
+When enabled, every input feature and every per-channel target is z-score transformed. Means and standard deviations are computed once from the retained training events, saved in `input_preprocessing.json`, and reused for all batches and during application. They are not recomputed per batch. The target channel's ADC input is zeroed first and the resulting feature vector is then standardized.
+
+When preprocessing is disabled, the network receives values in their original units and no preprocessing file is needed. A preprocessed model receives the automatic `inputzscore` suffix so that both variants can coexist.
+
+### Analytic all-input predictor
+
+`analytic_allinputs` derives one linear regression for each target channel. It uses the prepared event-level features, module one-hot entries, and all channel ADC measurements. The target channel's own ADC coefficient is fixed to zero.
+
+Target-channel metadata are omitted because every channel has its own coefficient row and intercept. The regression is solved from streaming covariance moments using feature scaling and a pseudoinverse; the saved weights are converted back to the original input units. Application therefore does not require DNN preprocessing or a normalization file.
+
+For an unseen module, the reserved `UNKNOWN` one-hot entry is activated. Its coefficient is zero because that entry is constant during derivation.
+
+## Installation
+
+Clone the repository in a location visible from lxplus:
 
 ```bash
 git clone git@github.com:reimersa/HGCalCMAnalysis.git
 cd HGCalCMAnalysis
 ```
 
-If working from a full `LocalCalibration` checkout instead, go to the analysis directory:
+Alternatively, enter this directory from a full `LocalCalibration` checkout:
 
 ```bash
 cd /path/to/LocalCalibration/scripts/HGCalCMAnalysis
 ```
 
-All commands below should be run from this `HGCalCMAnalysis` directory.
-
-## Environment Setup
-
-Create the Python virtual environment on your own EOS area:
+Create the virtual environment in the EOS location expected by the Condor wrapper:
 
 ```bash
 python3.9 -m venv /eos/user/${USER:0:1}/${USER}/torch-env
@@ -36,248 +85,253 @@ source /eos/user/${USER:0:1}/${USER}/torch-env/bin/activate
 pip install -r requirements.txt
 ```
 
-Start a working session from the analysis directory in your checkout. This can be inside CMSSW, but CMSSW setup is not required for the derive workflow:
+Run all commands below from the `HGCalCMAnalysis` directory with this environment active. A CMSSW runtime is not required by the Python derivation and application scripts.
 
-```bash
-cd /path/to/HGCalCMAnalysis
-source /eos/user/${USER:0:1}/${USER}/torch-env/bin/activate
-```
+## Data and output locations
 
-`requirements.txt` pins the package versions used for this workflow.
+`classes.AnalysisConfig` defines the directory layout. In the current configuration:
 
-## Data Locations
+- raw histofiller data are read from `/eos/user/a/areimers/hgcal/<campaign>`;
+- generated parquet files and correction artifacts are written to `/eos/user/<initial>/<user>/hgcal/<campaign>`;
+- plots are written below `plots/<campaign>` in the repository;
+- geometry and cell-area inputs are read from `data/`.
 
-Raw ROOT/histofiller inputs are intentionally read from:
+Users who do not read from the shared raw-data location should update `raw_datafolder_base` in `classes.py`. Supported campaign names are `Sep2025TB` and `Jun2026TB`; the entry-point setup blocks currently select `Sep2025TB`.
 
-```text
-/eos/user/a/areimers/hgcal/Sep2025TB
-```
+Generated products are separated by run, pedestal run, correction module or module group, correction run, and selection. Prepared DNN inputs have an additional deterministic schema folder containing the feature version and ordered module vocabulary. This allows, for example, five-module and ten-module input sets to coexist.
 
-Generated analysis inputs, correction artifacts, DNN inputs, trained models, and plots are written under the current user's EOS area:
+## Deriving corrections
 
-```text
-/eos/user/${USER:0:1}/${USER}/hgcal/Sep2025TB
-```
+### 1. Configure `derive.py`
 
-These locations are configured in `classes.py`. Static geometry inputs needed by this workflow, such as `cellareas.json`, are stored inside this directory under `data/`.
-
-## Deriving Corrections
-
-The derivation workflow is controlled by `derive.py`.
-
-First edit the setup block near the top of `derive.py`:
-
-- `modulenames`
-- `selection_for_correction`
-- `correction_run`
-- `pedestal_run`
-- `per_channel_cols`
-
-Then run the desired workflow steps with command-line flags. Running `derive.py` without flags prints the current setup and exits.
-
-Show the configured setup and available options:
-
-```bash
-python derive.py --show
-python derive.py --help
-```
-
-Available derive steps:
-
-```text
--p, --pedestals   calculate pedestal means/stds
--c, --convert     convert ROOT/synthetic inputs to parquet
--s, --selections  add variables and event selections
--a, --analytic    compute covariance/eigen artifacts and analytic predictor
--i, --dnninputs   prepare DNN inputs and refresh train/test split selections
--d, --localdnn    train one DNN locally using existing prepared DNN inputs
--q, --submitdnn   submit DNN Condor jobs using existing prepared DNN inputs
-    --all         run pedestals, convert, selections, analytic, dnninputs, and submitdnn
-```
-
-Typical full derivation with Condor DNN training:
-
-```bash
-python derive.py --all
-```
-
-Typical stepwise derivation:
-
-```bash
-python derive.py -p
-python derive.py -c
-python derive.py -s -a
-python derive.py -i
-python derive.py -q
-```
-
-Local DNN training alternative:
-
-```bash
-python derive.py -i
-python derive.py -d
-```
-
-`--dnninputs` prepares DNN inputs and then refreshes only the train/test split selections from the DNN split file. It only needs to be rerun when the underlying analysis inputs, selections, or DNN input features change. If only the DNN architecture, training tag, or training hyperparameters change, rerun `--localdnn` or `--submitdnn` without `--dnninputs`.
-
-Prepared parquet inputs are fully materialized under a deterministic schema subfolder of `dnn_training_inputs`. The schema key includes the feature version and ordered module vocabulary, so inputs for different module combinations coexist without overwriting one another. Network layout, preprocessing, and other training hyperparameters reuse the same prepared schema.
-
-### All-channel, multi-module DNN
-
-The `all_channels_multimodule_v1` schema passes every unmasked channel ADC to the DNN. When predicting channel `i`, its own ADC slot is set to zero, leaving the other `N-1` measurements. It also adds one-hot module inputs with one reserved final `UNKNOWN` entry.
-
-Set the following in `derive.py`:
+Edit the setup block near the top of `derive.py`. The main settings are:
 
 ```python
-modulenames = ["ML_F3WC_IH0182", "ML_F3WC_IH0190"]
+modulenames = [
+    "ML_F3WC_IH0180",
+    "ML_F3WC_IH0182",
+    # ...
+]
+
+selection_for_correction = "selection_trigtime"
+correction_run = "112044_112050_112060_112073_adcmax10"
+pedestal_run = 112044
+
 dnn_feature_version = prepare_dnn_inputs.FEATURE_VERSION_ALL_CHANNELS
-combine_modules = True
-per_channel_cols = ["channel_indices", "erx_indices", "cell_area_fraction"]
 dnn_model_tag = "allchannels_multimodule"
-dnn_preprocess_inputs = True  # set False to train on raw inputs/targets
-train_event_fractions = {
-    "ML_F3WC_IH0182": 1.0,
-    "ML_F3WC_IH0190": 0.5,
-}
-validation_event_fractions = {
-    "ML_F3WC_IH0182": 1.0,
-    "ML_F3WC_IH0190": 1.0,
-}
+dnn_preprocess_inputs = True
+per_channel_cols = ["channel_indices", "erx_indices", "cell_area_fraction"]
+
+frac = 0.5 if len(modulenames) > 5 else 1.0
+train_event_fractions = {module: frac for module in modulenames}
+validation_event_fractions = {module: frac for module in modulenames}
 ```
 
-Fractions are applied independently after the train/validation split. Event-ID hashing chooses a stable subset, so the same physical events are retained in every epoch and under every shuffle mode. The values must be in `(0, 1]`; remove a module from `modulenames` instead of assigning it zero.
+`combine_modules` is derived from the number of configured modules. For multi-module training, correction artifacts are stored below a `MULTI_<ordered module names>` group.
 
-When `dnn_preprocess_inputs` is true, both inputs and per-channel targets are z-score transformed using statistics computed only from the retained training events. The resolved model name receives an automatic `inputzscore` suffix. When false, no preprocessing file is used and the base model tag is retained. Set the corresponding `dnn_preprocess_inputs` and `dnn_tag` values in `apply.py` when applying the checkpoint.
+The event fractions are applied independently to each module after the stable train/test split. Fractions must be in `(0, 1]`. Event-ID hashing selects a reproducible subset. These fractions are training settings: changing them does not require `-i` to regenerate the materialized feature files.
 
-Run conversion again before preparing this schema because it requires the pre-cut `adc_chNNN_pedsub_nocut` columns. Training writes `model_manifest.json`, including the ordered module vocabulary and reserved unknown index. At application time, set `module_for_correction` to the corresponding `MULTI_...` model group. A target module absent from the training vocabulary automatically activates the saved `UNKNOWN` entry.
-
-The reserved `UNKNOWN` input is intentionally never active during training, matching the initial student procedure; no module-ID dropout or unknown-category retraining is performed.
-
-### Analytic all-inputs baseline
-
-`analytic_allinputs` derives one independent linear predictor per target channel from the same materialized all-channel inputs and retained training events used by the DNN. Each predictor uses the CM values, event-summary counts, module one-hot values, and the other `N-1` channel ADCs. Its own ADC coefficient is fixed to zero. The DNN's channel-index, eRx-index, and cell-area inputs are unnecessary here because every target has its own coefficient row and intercept.
-
-After preparing inputs, derive the predictor with:
+Before starting expensive work, inspect the complete resolved setup:
 
 ```bash
-./derive.py --analytic-allinputs
+./derive.py --show
 ```
 
-Use `./derive.py -i --analytic-allinputs` when the configured input schema has not yet been materialized. The derivation uses only the prepared `train` split and applies `train_event_fractions` independently to each module. It writes weights, intercepts, and a feature/module manifest under the combined correction group's `predictors` folder.
+### 2. Prepare the analysis data
 
-Apply and evaluate it like the existing methods:
+The stages can be run separately:
 
 ```bash
-./apply.py -k -p -m analytic_allinputs
+./derive.py -p       # pedestal means and standard deviations
+./derive.py -c       # ROOT or configured synthetic runs to parquet
+./derive.py -s       # derived variables and event selections
+./derive.py -i       # materialized all-channel inputs, targets, and split files
 ```
 
-Application does not need a preprocessing switch or preprocessing JSON. Feature scaling is used only internally to stabilize the pseudoinverse, after which weights are stored in the original input units. An unseen module activates the reserved `UNKNOWN` one-hot entry; because that entry is constant during derivation, its coefficient is fixed to zero.
-
-## Condor DNN Submission
-
-`python derive.py --submitdnn` and `python derive.py --all` submit DNN training jobs through Condor via `submit_train.py`.
-
-Before submitting, make sure a VOMS proxy exists at:
+Conversion is required before preparing the all-channel schema because `-i` reads the pre-cut `adc_chNNN_pedsub_nocut` columns. Use `--plot-dnninputs` together with `-i` to produce a histogram and summary for every materialized feature:
 
 ```bash
-/tmp/x509up_u$(id -u)
+./derive.py -i --plot-dnninputs
 ```
 
-## Apply Workflow
+Rerun `-i` when the input data, selection, feature schema, module vocabulary, or vocabulary order changes. It is not necessary when only the network architecture, epoch count, preprocessing choice, model tag, or event fractions change.
 
-The application workflow is controlled by `apply.py`.
+### 3. Derive analytic corrections
 
-First edit the setup block near the top of `apply.py`:
-
-- `modulenames`
-- `selection`
-- `selection_for_correction`
-- `target_run`
-- `pedestal_run`
-- `correction_run`
-- `module_for_correction`
-- DNN settings: `dnn_tag` and `dnn_preprocess_inputs`
-
-Running `apply.py` without flags prints the current setup and exits.
-
-Show the configured setup and available options:
+The original CM-channel predictor is derived with:
 
 ```bash
-python apply.py --show
-python apply.py --help
+./derive.py -a
 ```
 
-Available apply steps:
-
-```text
--c, --convert     convert target ROOT/synthetic inputs to parquet
--s, --selections  add variables and event selections on the target run
--m, --methods     choose methods: uncorrected analytic dnn
--k, --compute     add corrections where applicable, then compute diagnostics
--p, --plots       make detailed plots and summary comparison plots
-    --all         run convert, selections, compute, and plots for all methods
-```
-
-`--compute` always runs the method-specific correction step together with the downstream diagnostics: covariance/eigen outputs, fitted covariance noise model, and projection onto the uncorrected noise mode. For `uncorrected`, no correction is added; only the diagnostics are computed.
-
-`--plots` makes the detailed plots and summary comparison plots together. It is useful when the correction and diagnostics already exist and only the plots need to be rerun.
-
-Typical stepwise application:
+The full all-input linear predictor requires the materialized inputs from the preceding step:
 
 ```bash
-python apply.py -c
-python apply.py -s
-python apply.py -m uncorrected -k
-python apply.py -m analytic dnn -k
-python apply.py -m dnn -p
+./derive.py -A
 ```
 
-Compute and plot only the DNN method:
+Both can be requested after data preparation:
 
 ```bash
-python apply.py -m dnn -k -p
+./derive.py -a -A
 ```
 
-Full sweep over all methods:
+`analytic_allinputs` writes:
+
+- `analytic_allinputs_weights.parquet`;
+- `analytic_allinputs_intercepts.parquet`;
+- `analytic_allinputs_manifest.json`.
+
+### 4. Train the DNN
+
+For a single local training process:
 
 ```bash
-python apply.py -m uncorrected analytic dnn -c -s -k -p
+./derive.py -d
 ```
 
-The DNN strategy is selected inside the setup block. The current default is:
+For the configured multi-module training on HTCondor:
+
+```bash
+voms-proxy-init --voms cms
+./derive.py -q
+```
+
+Submission requires a valid proxy at `/tmp/x509up_u$(id -u)`. The current job request is one GPU, one CPU, 16 GB of memory, and the `tomorrow` job flavour. Generated submit files and live logs are placed under `workdir_condor/`:
+
+```bash
+condor_q "$USER"
+tail -f workdir_condor/<job-name>/<job-name>.out
+```
+
+The default configured network has hidden layers `[256, 256, 256, 32]`, no dropout, batches of 1024 `(event, channel)` samples, and 200 epochs.
+
+Each model directory contains at least:
+
+- `dnn_best.pth` and `dnn_last.pth`;
+- `model_manifest.json`;
+- `train_losses.npy` and `test_losses.npy`;
+- `input_preprocessing.json` when preprocessing is enabled.
+
+To distribute an inference model, provide `dnn_best.pth` and `model_manifest.json`, plus `input_preprocessing.json` for a preprocessed model. The manifest is required to reproduce the feature order and module mapping.
+
+### Combined derivation command
+
+The complete pipeline, including Condor submission, can be launched with:
+
+```bash
+./derive.py --all
+```
+
+For production work, running the stages separately is usually easier to inspect and resume.
+
+## Applying corrections
+
+### 1. Configure `apply.py`
+
+Edit the setup block near the top of `apply.py`:
 
 ```python
-dnn_tag = "chunkshuffle_modulesummaries_targetspreproc"
+modulenames = ["ML_F3WC_IH0182"]
+selection = "selection_trigtime"
+selection_for_correction = "selection_trigtime"
+target_run = 112049
+pedestal_run = 112044
+correction_run = "112044_112050_112060_112073_adcmax10"
+
+training_modules = [
+    "ML_F3WC_IH0180",
+    "ML_F3WC_IH0182",
+    "ML_F3WC_IH0190",
+    "ML_F3WC_IH0191",
+    "ML_F3WC_IH0192",
+    "ML_F3WC_IH0194",
+    "ML_F3WC_IH0196",
+    "ML_F3WC_IH0197",
+    "ML_F3WC_IH0198",
+    "ML_F3WC_IH0199",
+]
+module_for_correction = f"MULTI_{'_'.join(training_modules)}"
+dnn_tag = "allchannels_multimodule"
 dnn_preprocess_inputs = True
 ```
 
-The baseline DNN can be selected by switching to:
+`module_for_correction` identifies the artifact group, not necessarily the target module. For a multi-module model it must use the exact ordered training module list. The target module may be one of those modules or an unseen module; the saved DNN manifest determines the appropriate one-hot input.
 
-```python
-dnn_tag = ""
-dnn_preprocess_inputs = False
-```
+The following settings must match the derived model:
 
-DNN output columns include the resolved model tag so different DNN corrections can coexist in the same parquet files. The baseline DNN keeps the historical names:
+- `correction_run`;
+- `pedestal_run`;
+- `selection_for_correction`;
+- `module_for_correction`;
+- `dnn_tag`, architecture, and `dnn_preprocess_inputs` for DNN inference.
 
-```text
-adc_ch000_pedsub_pred_dnn
-adc_ch000_pedsub_resid_dnn
-```
-
-A tagged/preprocessed DNN writes columns such as:
-
-```text
-adc_ch000_pedsub_pred_dnn_chunkshuffle_modulesummaries_targetspreproc_inputzscore
-adc_ch000_pedsub_resid_dnn_chunkshuffle_modulesummaries_targetspreproc_inputzscore
-```
-
-## Standalone MIP/Landau Fit
-
-`mip_landau.py` streams matching columns from parquet inputs, fits a pedestal plus one- and two-MIP Landau-Gaussian model, and writes linear/logarithmic PDFs and a JSON fit summary:
+Check the resolved paths and model tag before running:
 
 ```bash
-python mip_landau.py \
+./apply.py --show
+```
+
+### 2. Convert a fresh target run and apply corrections
+
+For a fresh target run, compare the uncorrected data, all-input linear regression, and DNN with:
+
+```bash
+./apply.py \
+  -c -s -k -p \
+  -m uncorrected analytic_allinputs dnn
+```
+
+This performs:
+
+1. target-data conversion;
+2. variable and selection construction;
+3. correction application;
+4. covariance/eigen, covariance-noise-model, and projection diagnostics;
+5. detailed and summary plots.
+
+The uncorrected method is included because its leading noise eigenvector is the reference basis used by the corrected projection diagnostics.
+
+If conversion and selections already exist, omit `-c -s`:
+
+```bash
+./apply.py -k -p -m uncorrected analytic_allinputs dnn
+```
+
+To recompute only plots from existing corrected columns and diagnostic artifacts:
+
+```bash
+./apply.py -p -m uncorrected analytic_allinputs dnn
+```
+
+To evaluate only one correction after the uncorrected reference has already been computed:
+
+```bash
+./apply.py -k -p -m dnn
+```
+
+The original CM-channel method can be included explicitly with `-m analytic`. `--all` runs conversion, selections, computation, and plotting for all four methods, and therefore requires artifacts for every method:
+
+```bash
+./apply.py --all
+```
+
+Use `--plot-dnninputs` with DNN computation to inspect every feature passed to the saved network. For preprocessed models, both raw and network-space distributions are written:
+
+```bash
+./apply.py -k -m dnn --plot-dnninputs
+```
+
+DNN prediction and residual column names include the resolved model tag. This prevents raw-input and preprocessed corrections from overwriting one another. Summary plot directories likewise include the compared correction tags.
+
+## MIP/Landau fits
+
+For non-pedestal target runs, the normal `apply.py -p` workflow fits the pooled all-channel distribution for each plotted method. The model contains pedestal, one-MIP, and two-MIP components with Landau-Gaussian convolution. Linear and logarithmic PDFs and a JSON fit summary are written below the method's `distributions_1d` plot directory. Plot annotations report the Landau location, Landau width `c_L`, fitted one-MIP peak, and fit quality.
+
+The fitter can also be run directly on arbitrary parquet files:
+
+```bash
+./mip_landau.py \
   '/eos/user/.../analysis_inputs/.../df_batch*.parquet' \
   --columns 'adc_ch*_pedsub_resid_dnn_*' \
   --output-dir plots/mip_landau \
@@ -285,6 +339,28 @@ python mip_landau.py \
   --fit-range -5 35
 ```
 
-The numerical Landau lookup is initialized lazily on the first fit, so importing the ordinary plotting modules has no added cost.
+Input paths may be literal parquet files or glob patterns. `--columns` uses shell-style `fnmatch` matching against parquet column names.
 
-For non-pedestal runs, the normal `apply.py --plots` workflow also performs this fit on the pooled all-channel distribution after applying the configured event selection. The method-specific `distributions_1d` folder receives linear/logarithmic fit PDFs and a JSON summary. The plot annotation includes the Landau location, Landau width `c_L`, fitted one-MIP peak, and fit quality.
+## Reproducibility and schema checks
+
+The workflow writes manifests alongside prepared inputs, DNN models, and analytic all-input artifacts. At training and application time it validates:
+
+- the feature schema and exact feature order;
+- the ordered module vocabulary and reserved unknown index;
+- the channel count and per-channel columns;
+- the DNN architecture, model tag, and preprocessing choice.
+
+Do not manually reorder columns or module names. Copy the associated manifest whenever moving a correction artifact. Prepared inputs for different vocabularies intentionally live in separate schema folders; training configurations that share a vocabulary and feature version reuse the same materialized inputs.
+
+## Tests
+
+Run the focused regression tests from the repository directory:
+
+```bash
+python -m unittest \
+  tests.test_dnn_multimodule \
+  tests.test_analytic_allinputs \
+  tests.test_mip_plotting
+```
+
+The tests cover module encoding and unknown-module handling, target-channel masking, preprocessing and manifest checks, analytic all-input derivation/application, and MIP plotting integration.
